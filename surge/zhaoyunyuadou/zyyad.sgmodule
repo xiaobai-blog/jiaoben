@@ -1,0 +1,10 @@
+#!name=赵云与阿斗-免广告领奖励
+#!desc=登录接口修改 userType=1
+#!author=YourName
+#!version=1.0.0
+
+[Script]
+zyyad = type=http-response,pattern=^https?:\/\/api.*\.mihuangame\.com\/api\/v\d\/sys\/user\/login,requires-body=1,max-size=0,script-path=https://raw.githubusercontent.com/你的GitHub用户名/Rewrite/main/zyyad.js
+
+[MITM]
+hostname = api*.mihuangame.com
