@@ -7,7 +7,7 @@ WidgetMetadata = {
   author: "Forward",
   site: "https://madou.club",
   icon: "https://madou.club/showcase/img/logo.png",
-  detailCacheDuration: 300,
+  detailCacheDuration: 60,
   modules: [
     {
       id: "loadList",
@@ -423,9 +423,36 @@ async function loadDetail(link) {
     const title = $("h1.article-title").text().trim() || url;
 
     let videoUrl = "";
+    const backdropPaths = [];
     const iframeSrc = $("article.article-content iframe").attr("src");
     if (iframeSrc) {
-      videoUrl = iframeSrc.trim();
+      const shareUrl = iframeSrc.trim();
+      try {
+        // share 页是真实播放页，内含 DPlayer 与 m3u8 地址 + 临时 token
+        const shareRes = await Widget.http.get(shareUrl, { headers: HEADERS });
+        const shareHtml = shareRes.data;
+        const m3u8Match = shareHtml.match(/var\s+m3u8\s*=\s*'([^']+)'/);
+        const tokenMatch = shareHtml.match(/var\s+token\s*=\s*"([^"]+)"/);
+        const picMatch = shareHtml.match(/pic:\s*'([^']+)'/);
+        const thumbMatch = shareHtml.match(/thumbnails:\s*'([^']+)'/);
+        if (m3u8Match) {
+          // base = https://dash.madou.club
+          const base = shareUrl.replace(/\/share\/.*$/, "");
+          let m3u8 = m3u8Match[1];
+          if (tokenMatch && tokenMatch[1]) {
+            m3u8 += "?token=" + tokenMatch[1];
+          }
+          videoUrl = base + m3u8; // 真实可播 HLS 地址（含 token）
+          if (picMatch && picMatch[1]) backdropPaths.push(base + picMatch[1]);
+          if (thumbMatch && thumbMatch[1] && thumbMatch[1] !== picMatch[1])
+            backdropPaths.push(base + thumbMatch[1]);
+        } else {
+          videoUrl = shareUrl; // 兜底
+        }
+      } catch (e) {
+        console.warn("[loadDetail] 提取真实视频源失败, 回退为 share 页:", e.message);
+        videoUrl = shareUrl; // 兜底
+      }
     }
 
     const genreItems = [];
@@ -493,6 +520,7 @@ async function loadDetail(link) {
       link: url,
       description: description,
       videoUrl: videoUrl || undefined,
+      backdropPaths: backdropPaths.length ? backdropPaths : undefined,
       playerType: "system",
       genreItems: genreItems.length ? genreItems : undefined,
       relatedItems: relatedItems.length ? relatedItems : undefined,
