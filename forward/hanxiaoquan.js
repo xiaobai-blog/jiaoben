@@ -1,4 +1,4 @@
-var WidgetMetadata = {
+WidgetMetadata = {
   id: "forward.jennyhow",
   title: "韩小圈",
   version: "1.0.0",
@@ -50,7 +50,7 @@ var WidgetMetadata = {
     title: "搜索",
     functionName: "search",
     params: [
-      { name: "keyword", title: "关键词", type: "input", placeholders: [{ title: "演员 / 剧名", value: "宋慧乔" }] },
+      { name: "keyword", title: "关键词", type: "input" },
       { name: "page", title: "页码", type: "page" },
     ],
   },
