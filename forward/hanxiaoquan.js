@@ -1,4 +1,4 @@
-WidgetMetadata = {
+var WidgetMetadata = {
   id: "forward.jennyhow",
   title: "韩小圈",
   version: "1.0.0",
@@ -12,40 +12,36 @@ WidgetMetadata = {
     {
       id: "hanju",
       title: "最新韩剧",
-      functionName: "loadList",
+      functionName: "loadListHanju",
       cacheDuration: 3600,
       params: [
-        { name: "cat", type: "constant", value: "1" },
         { name: "page", type: "page" },
       ],
     },
     {
       id: "movie",
       title: "韩国电影",
-      functionName: "loadList",
+      functionName: "loadListMovie",
       cacheDuration: 3600,
       params: [
-        { name: "cat", type: "constant", value: "2" },
         { name: "page", type: "page" },
       ],
     },
     {
       id: "variety",
       title: "韩国综艺",
-      functionName: "loadList",
+      functionName: "loadListVariety",
       cacheDuration: 3600,
       params: [
-        { name: "cat", type: "constant", value: "3" },
         { name: "page", type: "page" },
       ],
     },
     {
       id: "anime",
       title: "韩国动漫",
-      functionName: "loadList",
+      functionName: "loadListAnime",
       cacheDuration: 3600,
       params: [
-        { name: "cat", type: "constant", value: "4" },
         { name: "page", type: "page" },
       ],
     },
@@ -110,6 +106,11 @@ async function loadList(params = {}) {
     throw error;
   }
 }
+
+async function loadListHanju(p) { return loadList({ page: p && p.page, cat: "1" }); }
+async function loadListMovie(p) { return loadList({ page: p && p.page, cat: "2" }); }
+async function loadListVariety(p) { return loadList({ page: p && p.page, cat: "3" }); }
+async function loadListAnime(p) { return loadList({ page: p && p.page, cat: "4" }); }
 
 // 提取播放页内嵌的 m3u8 地址： var now="https://.../index.m3u8"
 async function fetchM3u8(id, src, ep) {
