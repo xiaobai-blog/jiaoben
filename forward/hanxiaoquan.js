@@ -1,7 +1,3 @@
-// 韩小圈 (jennyhow.com) ForwardWidget 模块
-// 提供：最新韩剧 / 韩国电影 / 韩国综艺 / 韩国动漫 列表，详情页解析，选集播放(m3u8)，以及搜索。
-// 约定见 SKILL.md —— 字段名、link+loadDetail 机制、search 顶层块，均按规范实现。
-
 WidgetMetadata = {
   id: "forward.jennyhow",
   title: "韩小圈",
@@ -57,7 +53,6 @@ WidgetMetadata = {
   search: {
     title: "搜索",
     functionName: "search",
-    requiresWebView: true, // search.php 有 WAF 挑战页，需 WebView 执行 JS 绕过
     params: [
       { name: "keyword", title: "关键词", type: "input", placeholders: [{ title: "演员 / 剧名", value: "宋慧乔" }] },
       { name: "page", title: "页码", type: "page" },
