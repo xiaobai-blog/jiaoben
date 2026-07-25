@@ -129,7 +129,11 @@ function aes256CbcDecrypt(base64Cipher, keyStr, ivStr) {
   if (pad > 0 && pad <= 16) len -= pad;
   return bytesToUtf8(out.slice(0, len));
 }
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// Widget环境不支持setTimeout，用忙等替代
+function busyWait(ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { /* busy wait */ }
+}
 
 // ============ 签名 & 请求 ============
 function makeSign(urlPath, paramsObj, method) {
@@ -178,7 +182,7 @@ async function apiPost(srv, path, params) {
 async function tryWithRetry(srv, path, method, params, maxRetries) {
   maxRetries = maxRetries || 2;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (attempt > 0) await sleep(2000); // 重试前等待2秒
+    if (attempt > 0) busyWait(500); // 重试前等待500ms
     try {
       let raw;
       if (method === "GET") raw = await apiGet(srv, path, params);
@@ -232,7 +236,7 @@ async function loadHome() {
   let failCount = 0;
 
   for (const t of tests) {
-    await sleep(500); // 每个请求间隔500ms避免限流
+    busyWait(300); // 每个请求间隔300ms避免限流
     for (const method of t.methods) {
       report += "[" + t.note + "] " + method + " " + t.path + " ... ";
       const r = await tryWithRetry(SRV, t.path, method, t.params, 1);
