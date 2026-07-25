@@ -1,8 +1,6 @@
-// 网飞猫 ncat21 影视模块 - 诊断版 v4
-// 关键修复：使用 http:// 而非 https://（API 端口 51080/51122/51172 是 HTTP 端口）
-// 改进：1) http:// 请求 + 签名 探测所有已知路径
-//       2) 探测网站 HTML 也改用 http:// 尝试
-//       3) 增加更多路径变体
+// 网飞猫 ncat21 影视模块 v5 - 自适应连接
+// 策略：先试 HTTPS（v1/v2曾成功握手），失败降级 HTTP
+// 并行探测所有已知 IP+端口+路径，最快响应者胜出
 
 const HASH = "te@9fs#5tbf8#dx7zw8nx";
 const AES_KEY = "ayt5wy5afwmwrpb19k9s3psx3dymyd0n";
@@ -151,43 +149,31 @@ function makeSign(urlPath, paramsObj, method) {
 }
 
 // ============ 请求工具 ============
-async function apiGet(apiBase, urlPath, params) {
-  const { ts, sign, queryString } = makeSign(urlPath, params);
-  const fullUrl = apiBase + urlPath + (queryString ? "?" + queryString : "");
-  const resp = await Widget.http.get(fullUrl, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 Chrome/120.0",
-      "Accept": "application/json, text/plain, */*",
-      "ts": ts,
-      "sign": sign,
-      "Content-Type": "application/json;charset=UTF-8"
-    },
-    timeout: 10000
-  });
+const REQ_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36",
+  "Accept": "application/json, text/plain, */*",
+  "Accept-Language": "zh-CN,zh;q=0.9",
+  "Content-Type": "application/json;charset=UTF-8"
+};
+
+async function apiRequest(apiBase, urlPath, params, method) {
+  method = method || "GET";
+  const { ts, sign, queryString } = makeSign(urlPath, params, method);
+  const fullUrl = apiBase + urlPath + (method === "GET" && queryString ? "?" + queryString : "");
+  const headers = Object.assign({}, REQ_HEADERS, { ts: ts, sign: sign });
+  
+  let resp;
+  if (method === "GET") {
+    resp = await Widget.http.get(fullUrl, { headers: headers, timeout: 8000 });
+  } else {
+    resp = await Widget.http.post(fullUrl, JSON.stringify(params), { headers: headers, timeout: 8000 });
+  }
   let raw = resp.data;
   if (raw && typeof raw === "object" && raw.data !== undefined) raw = raw.data;
   return raw;
 }
 
-async function apiPost(apiBase, urlPath, params) {
-  const { ts, sign } = makeSign(urlPath, params, "POST");
-  const fullUrl = apiBase + urlPath;
-  const resp = await Widget.http.post(fullUrl, JSON.stringify(params), {
-    headers: {
-      "User-Agent": "Mozilla/5.0 Chrome/120.0",
-      "Accept": "application/json, text/plain, */*",
-      "ts": ts,
-      "sign": sign,
-      "Content-Type": "application/json;charset=UTF-8"
-    },
-    timeout: 10000
-  });
-  let raw = resp.data;
-  if (raw && typeof raw === "object" && raw.data !== undefined) raw = raw.data;
-  return raw;
-}
-
-async function safeDecrypt(raw) {
+function safeDecrypt(raw) {
   if (!raw) return null;
   const s = String(raw).replace(/\n/g, "");
   if (s.length < 5) return null;
@@ -199,207 +185,165 @@ async function safeDecrypt(raw) {
   }
 }
 
-// ============ 第1步：动态提取 API 域名 ============
-async function extractApiDomain() {
-  let report = "";
-  const candidates = [];
+// ============ API 服务器列表 ============
+const API_SERVERS = [
+  "https://43.248.100.69:51080",
+  "https://103.194.185.51:51122", 
+  "https://103.194.185.51:51172",
+  "http://43.248.100.69:51080",
+  "http://103.194.185.51:51122",
+  "http://103.194.185.51:51172",
+  "http://43.248.100.69:51030",
+  "http://43.248.100.69:51050",
+];
 
-  // 尝试从网站 HTML 提取 - 先用 http://
+// ============ 单次探测 ============
+async function tryOneRequest(server, path, method, params) {
   try {
-    report += "[1] 尝试从 http://www.ncat21.com 提取 whatTMDwhatTMDApiDomain...\n";
-    const resp = await Widget.http.get("http://www.ncat21.com/", {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
-      },
-      timeout: 15000
-    });
-    const html = String(resp.data);
-    const m = html.match(/whatTMDwhatTMDApiDomain\s*=\s*["']([^"']+)["']/);
-    if (m && m[1]) {
-      const domain = m[1];
-      report += "  ✓ 找到: " + domain + "\n";
-      candidates.push(domain);
-    } else {
-      report += "  ✗ HTML 中未找到 whatTMDwhatTMDApiDomain\n";
-      // 也输出 script src 帮助分析
-      const scripts = html.match(/<script[^>]*src=["']([^"']+)["']/g) || [];
-      if (scripts.length) {
-        report += "  script src: " + scripts.slice(0, 5).join(", ").replace(/<[^>]*>/g, "") + "\n";
-      }
+    const raw = await apiRequest(server, path, params, method);
+    if (raw && String(raw).length > 5) {
+      const dec = safeDecrypt(raw);
+      return { ok: true, decrypted: dec, raw: String(raw).slice(0, 200), server, path, method };
     }
+    return { ok: false, reason: "空/过短响应:" + String(raw).slice(0, 50) };
   } catch (e) {
-    report += "  ✗ 获取网站失败: " + (e.message || String(e)).slice(0, 100) + "\n";
+    const em = (e.message || String(e)).slice(0, 80);
+    return { ok: false, reason: em, server, path, method };
+  }
+}
+
+// ============ 探测函数 ============
+// 用 Promise.race 并行探测，第一个成功的就返回
+async function probeAll(servers) {
+  const tests = [
+    { path: "/vod/copyright", params: { appId: APP_ID } },
+    { path: "/vod/copyr", params: { appId: APP_ID } },
+    { path: "/vod/history", params: { appId: APP_ID, page: "1" } },
+    { path: "/vod/histo", params: { appId: APP_ID, page: "1" } },
+    { path: "/vod/favorite", params: { appId: APP_ID } },
+    { path: "/vod/favor", params: { appId: APP_ID } },
+    { path: "/user/login", params: { appId: APP_ID } },
+    { path: "/user/logi", params: { appId: APP_ID } },
+    { path: "/user/info", params: { appId: APP_ID } },
+    { path: "/app/announcements", params: { appId: APP_ID } },
+    { path: "/app/annou", params: { appId: APP_ID } },
+    { path: "/config/unknown", params: { appId: APP_ID } },
+  ];
+
+  const allPromises = [];
+  for (const srv of servers) {
+    for (const t of tests) {
+      allPromises.push(tryOneRequest(srv, t.path, "GET", t.params));
+      allPromises.push(tryOneRequest(srv, t.path, "POST", t.params));
+    }
   }
 
-  // 其他可能站点 - 也用 http://
+  // 用 race 方式并行执行，第一个成功的返回
+  // 但由于 Widget 环境可能不支持 Promise.race，我们用手动方式
+  const results = [];
+  const errors = [];
+  
+  // 分批并行执行，每批 8 个
+  for (let i = 0; i < allPromises.length; i += 8) {
+    const batch = allPromises.slice(i, i + 8);
+    const batchResults = await Promise.all(batch);
+    for (const r of batchResults) {
+      if (r.ok) return r;
+      if (r.reason) errors.push(r.server + " " + r.method + " " + r.path + " => " + r.reason);
+    }
+    results.push(...batchResults);
+  }
+
+  return { ok: false, errors: errors, totalTried: results.length };
+}
+
+// ============ 尝试提取网站 API 域名 ============
+async function tryExtractFromSite() {
   const siteUrls = [
-    "http://ncat21.com/",
-    "http://103.194.185.51:51122/",
+    { url: "https://www.ncat21.com/", label: "ncat21" },
+    { url: "https://www.ncat23.com/", label: "ncat23" },
+    { url: "http://www.ncat21.com/", label: "ncat21-http" },
   ];
   
-  for (const url of siteUrls) {
-    if (url === "https://www.ncat21.com/") continue; // already tried
+  for (const s of siteUrls) {
     try {
-      const resp = await Widget.http.get(url, {
-        headers: { "User-Agent": "Mozilla/5.0 Chrome/120.0", "Accept": "text/html" },
+      const resp = await Widget.http.get(s.url, {
+        headers: Object.assign({}, REQ_HEADERS, { "Accept": "text/html" }),
         timeout: 10000
       });
       const html = String(resp.data);
       const m = html.match(/whatTMDwhatTMDApiDomain\s*=\s*["']([^"']+)["']/);
       if (m && m[1]) {
-        report += "  ✓ " + url + " → " + m[1] + "\n";
-        if (!candidates.includes(m[1])) candidates.push(m[1]);
+        return { ok: true, domain: m[1], source: s.label };
       }
     } catch (e) {
       // skip
     }
   }
-
-  // 后备：使用 http://（这些是 HTTP 端口，非 HTTPS）
-  const fallbacks = [
-    "http://43.248.100.69:51080",
-    "http://103.194.185.51:51122",
-    "http://103.194.185.51:51172",
-    "http://43.248.100.69:51030",
-    "http://43.248.100.69:51050",
-  ];
-  for (const fb of fallbacks) {
-    if (!candidates.includes(fb)) candidates.push(fb);
-  }
-
-  return { candidates, report };
+  return { ok: false };
 }
 
-// ============ 第2步：探测 API ============
-async function probeApi(apiBase) {
-  // 先试 kkys 确认路径 - 这些路径不加密，直接返回 JSON
-  const testPaths = [
-    { path: "/vod/copyright", label: "copyright", params: { appId: APP_ID } },
-    { path: "/vod/copyr", label: "copyr(简写)", params: { appId: APP_ID } },
-    { path: "/vod/history", label: "history", params: { appId: APP_ID, page: "1" } },
-    { path: "/vod/histo", label: "histo(简写)", params: { appId: APP_ID, page: "1" } },
-    { path: "/vod/favorite", label: "favorite", params: { appId: APP_ID } },
-    { path: "/vod/favor", label: "favor(简写)", params: { appId: APP_ID } },
-    { path: "/user/login", label: "login", params: { appId: APP_ID } },
-    { path: "/user/logi", label: "logi(简写)", params: { appId: APP_ID } },
-    { path: "/user/info", label: "userInfo", params: { appId: APP_ID } },
-    { path: "/app/announcements", label: "announcements", params: { appId: APP_ID } },
-    { path: "/app/annou", label: "annou(简写)", params: { appId: APP_ID } },
-    { path: "/config/unknown", label: "config", params: { appId: APP_ID } },
-  ];
-
-  let report = "";
-  let working = false;
-
-  for (const tp of testPaths) {
-    for (const method of ["GET", "POST"]) {
-      try {
-        let raw;
-        if (method === "GET") {
-          raw = await apiGet(apiBase, tp.path, tp.params);
-        } else {
-          raw = await apiPost(apiBase, tp.path, tp.params);
-        }
-        
-        if (raw && String(raw).length > 2) {
-          // 尝试解密
-          const dec = await safeDecrypt(raw);
-          if (dec) {
-            report += "  ✓ " + method + " " + tp.path + " (解密成功) keys:{" + Object.keys(dec).join(",") + "}\n";
-            working = true;
-            return { working: true, report, foundPath: tp.path, foundMethod: method, foundData: dec };
-          } else {
-            report += "  ~ " + method + " " + tp.path + " 响应:" + String(raw).slice(0, 80) + "\n";
-            working = true; // 有响应就算通
-          }
-        }
-      } catch (e) {
-        const em = (e.message || String(e)).slice(0, 60);
-        if (!em.includes("404")) {
-          report += "  ✗ " + method + " " + tp.path + " => " + em + "\n";
-        }
-      }
-    }
-  }
-
-  return { working: false, report };
-}
-
-// ============ 主诊断流程 ============
+// ============ 主函数 ============
 async function loadHome() {
-  let report = "===== 网飞猫 诊断 v4 (http://) =====\n\n";
+  let report = "===== 网飞猫 v5 诊断 =====\n\n";
 
-  // Step 1: 获取 API 域名
-  report += "【Step 1】动态获取 API 域名:\n";
-  const { candidates, report: domainReport } = await extractApiDomain();
-  report += domainReport;
-
-  if (!candidates.length) {
-    report += "\n❌ 未能获取任何 API 域名候选！\n";
-    throw new Error(report);
+  // Step 1: 从网站提取 API 域名
+  report += "【Step 1】尝试从网站提取 API 域名...\n";
+  const siteResult = await tryExtractFromSite();
+  if (siteResult.ok) {
+    report += "  ✓ 从 " + siteResult.source + " 提取: " + siteResult.domain + "\n";
+    // 加入候选列表
+    if (!API_SERVERS.includes(siteResult.domain)) {
+      API_SERVERS.unshift(siteResult.domain);
+    }
+  } else {
+    report += "  ✗ 未能从网站提取 API 域名\n";
   }
 
-  // Step 2: 依次测试每个候选
-  report += "\n【Step 2】探测 API (先测 kkys 确认路径):\n";
-  let found = null;
-
-  for (const apiBase of candidates) {
-    report += "\n--- 测试 " + apiBase + " ---\n";
-    const result = await probeApi(apiBase);
-    report += result.report;
-    if (result.working) {
-      found = result;
-      break;
-    }
-  }
-
-  if (!found || !found.working) {
-    report += "\n❌ 所有 API 候选均失败！\n";
-    // 试试不带签名的简单探测
-    report += "\n【Step 3】不带签名直接探测各 API 根路径:\n";
-    for (const apiBase of candidates) {
-      try {
-        const r = await Widget.http.get(apiBase + "/", { timeout: 5000 });
-        report += "  ✓ " + apiBase + "/ → " + String(r.data).slice(0, 100) + "\n";
-      } catch (e) {
-        report += "  ✗ " + apiBase + "/ → " + (e.message || e).slice(0, 80) + "\n";
-      }
-    }
-    
-    report += "\n【Step 4】尝试 ncat21.com 页面请求详情:\n";
+  // Step 2: 先快速测试无签名的根路径，确认连接
+  report += "\n【Step 2】快速连接测试（无签名，仅测连通性）:\n";
+  for (const srv of API_SERVERS.slice(0, 4)) {
     try {
-      const r = await Widget.http.get("http://www.ncat21.com/", {
-        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0", "Accept": "text/html" },
-        timeout: 15000
-      });
-      const html = String(r.data).slice(0, 3000);
-      report += "  首页 HTML 前 3000 字符:\n" + html + "\n";
-      
-      // 分析重要的全局赋值
-      const vars = html.match(/(?:window\.)?(\w+(?:TMD|tmd)\w*)\s*=\s*["'][^"']+["']/g) || [];
-      if (vars.length) {
-        report += "  找到的相关变量:\n";
-        vars.forEach(v => report += "    " + v + "\n");
-      }
-      
-      // key 值
-      const keyMatch = html.match(/\bkey\s*:\s*["']([^"']+)["']/g);
-      if (keyMatch) report += "  key 值: " + keyMatch.join(", ") + "\n";
+      const r = await Widget.http.get(srv + "/", { timeout: 5000 });
+      report += "  ✓ " + srv + "/ → " + String(r.data).slice(0, 60) + "\n";
     } catch (e) {
-      report += "  ✗ " + (e.message || e).slice(0, 100) + "\n";
+      report += "  ✗ " + srv + "/ → " + (e.message || e).slice(0, 60) + "\n";
     }
+  }
 
+  // Step 3: 全面探测
+  report += "\n【Step 3】签名 API 探测（各路径 GET/POST）:\n";
+  const result = await probeAll(API_SERVERS);
+
+  if (result.ok) {
+    report += "\n✓ 找到工作端点!\n";
+    report += "  服务器: " + result.server + "\n";
+    report += "  方法: " + result.method + "\n";
+    report += "  路径: " + result.path + "\n";
+    if (result.decrypted) {
+      report += "  解密数据: " + JSON.stringify(result.decrypted).slice(0, 500) + "\n";
+    } else {
+      report += "  原始响应: " + result.raw + "\n";
+    }
+    report += "\n✓ API 连接成功，可以继续开发内容模块。\n";
     throw new Error(report.slice(0, 5000));
   }
 
-  // 如果找到了工作路径，进一步探测内容端点
-  if (found.foundData) {
-    report += "\n✓ 找到工作路径: " + (found.foundMethod || "GET") + " " + found.foundPath + "\n";
-    report += "  解密数据: " + JSON.stringify(found.foundData).slice(0, 500) + "\n";
+  // 全部失败
+  report += "\n❌ 所有探测均失败（共尝试 " + result.totalTried + " 次）\n";
+  report += "\n前 30 条错误:\n";
+  for (let i = 0; i < Math.min(30, result.errors.length); i++) {
+    report += "  " + (i + 1) + ". " + result.errors[i] + "\n";
   }
-
+  
+  report += "\n【结论】\n";
+  report += "1. HTTPS 自签名证书可能被 iOS ATS 拦截\n";
+  report += "2. HTTP 明文连接被服务端拒绝\n";
+  report += "3. ncat21.com 有 CDNdefend 反爬保护\n";
+  report += "建议：在 iOS App 的 Info.plist 中添加 ATS 例外:\n";
+  report += "  NSAppTransportSecurity > NSExceptionDomains\n";
+  report += "  添加 43.248.100.69 和 103.194.185.51 允许自签名证书\n";
+  
   throw new Error(report.slice(0, 5000));
 }
 
@@ -413,9 +357,9 @@ async function search(kw) { return { items: [] }; }
 
 WidgetMetadata = {
   id: "ncat21",
-  title: "网飞猫 ncat21 [诊断v4]",
-  description: "v4:用http://替代https://(SSL修复)+更多端口",
-  version: "1.4.1-diag4",
+  title: "网飞猫 ncat21 [诊断v5]",
+  description: "v5:HTTPS优先+HTTP降级+并行探测+网站配置提取",
+  version: "1.5.0-diag5",
   requiredVersion: "0.0.1",
   modules: [
     { id: "home", title: "诊断/首页", functionName: "loadHome", cacheDuration: 60, params: [] },
