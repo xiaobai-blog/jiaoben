@@ -329,7 +329,7 @@ async function probeApi(apiBase) {
 
 // ============ 主诊断流程 ============
 async function loadHome() {
-  let report = "===== 网飞猫 诊断 v3 =====\n\n";
+  let report = "===== 网飞猫 诊断 v4 (http://) =====\n\n";
 
   // Step 1: 获取 API 域名
   report += "【Step 1】动态获取 API 域名:\n";
