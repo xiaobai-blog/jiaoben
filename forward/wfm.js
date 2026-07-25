@@ -1,6 +1,5 @@
-// 网飞猫 ncat21 影视模块 v5 - 自适应连接
-// 策略：先试 HTTPS（v1/v2曾成功握手），失败降级 HTTP
-// 并行探测所有已知 IP+端口+路径，最快响应者胜出
+// 网飞猫 ncat21 v6 - 精确探测真实 API
+// 策略：HTTP+签名头(连接可用) → 过滤HTML响应 → 寻找JSON/加密数据
 
 const HASH = "te@9fs#5tbf8#dx7zw8nx";
 const AES_KEY = "ayt5wy5afwmwrpb19k9s3psx3dymyd0n";
@@ -15,7 +14,7 @@ const DEVICE_ID = (function () {
 })();
 const DEVICE_CREATED_AT = String(Date.now());
 
-// ============ 纯 JS crypto ============
+// ============ crypto (same as before) ============
 function utf8ToBytes(str) {
   const out = [];
   for (let i = 0; i < str.length; i++) {
@@ -138,7 +137,7 @@ function aes256CbcDecrypt(base64Cipher, keyStr, ivStr) {
   return bytesToUtf8(out.slice(0, len));
 }
 
-// ============ 签名 ============
+// ============ 签名 & 请求 ============
 function makeSign(urlPath, paramsObj, method) {
   method = method || "GET";
   const ts = Date.now();
@@ -148,9 +147,9 @@ function makeSign(urlPath, paramsObj, method) {
   return { ts: String(ts), sign: hmacSha1(msg, HASH), queryString };
 }
 
-// ============ 请求工具 ============
-const REQ_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36",
+const UA = "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36";
+const BASE_HEADERS = {
+  "User-Agent": UA,
   "Accept": "application/json, text/plain, */*",
   "Accept-Language": "zh-CN,zh;q=0.9",
   "Content-Type": "application/json;charset=UTF-8"
@@ -160,7 +159,7 @@ async function apiRequest(apiBase, urlPath, params, method) {
   method = method || "GET";
   const { ts, sign, queryString } = makeSign(urlPath, params, method);
   const fullUrl = apiBase + urlPath + (method === "GET" && queryString ? "?" + queryString : "");
-  const headers = Object.assign({}, REQ_HEADERS, { ts: ts, sign: sign });
+  const headers = Object.assign({}, BASE_HEADERS, { ts: ts, sign: sign });
   
   let resp;
   if (method === "GET") {
@@ -178,176 +177,212 @@ function safeDecrypt(raw) {
   const s = String(raw).replace(/\n/g, "");
   if (s.length < 5) return null;
   try {
-    const json = aes256CbcDecrypt(s, AES_KEY, AES_IV);
-    return JSON.parse(json);
+    return JSON.parse(aes256CbcDecrypt(s, AES_KEY, AES_IV));
   } catch (e) {
     return null;
   }
 }
 
-// ============ API 服务器列表 ============
+function isHtmlResponse(raw) {
+  if (!raw) return true;
+  const s = String(raw).trim();
+  if (s.length < 2) return true;
+  if (s.startsWith("<!DOCTYPE") || s.startsWith("<html") || s.startsWith("<HTML")) return true;
+  return false;
+}
+
+function looksLikeEncrypted(raw) {
+  const s = String(raw).trim();
+  // Base64-like: long alphanumeric+/= string, no HTML/JSON brackets
+  if (/^[A-Za-z0-9+/=\n\r\s]+$/.test(s) && s.length > 40) return true;
+  return false;
+}
+
+// ============ API 服务器 ============
 const API_SERVERS = [
-  "https://43.248.100.69:51080",
-  "https://103.194.185.51:51122", 
-  "https://103.194.185.51:51172",
   "http://43.248.100.69:51080",
   "http://103.194.185.51:51122",
   "http://103.194.185.51:51172",
-  "http://43.248.100.69:51030",
-  "http://43.248.100.69:51050",
 ];
 
-// ============ 单次探测 ============
+// ============ 探测函数（过滤HTML，寻找真实API） ============
 async function tryOneRequest(server, path, method, params) {
   try {
     const raw = await apiRequest(server, path, params, method);
-    if (raw && String(raw).length > 5) {
-      const dec = safeDecrypt(raw);
-      return { ok: true, decrypted: dec, raw: String(raw).slice(0, 200), server, path, method };
+    if (!raw || String(raw).length < 5) {
+      return { ok: false, reason: "空响应" };
     }
-    return { ok: false, reason: "空/过短响应:" + String(raw).slice(0, 50) };
+    
+    const strRaw = String(raw).trim();
+    
+    // 跳过 HTML 响应
+    if (isHtmlResponse(strRaw)) {
+      return { ok: false, reason: "HTML响应(" + strRaw.slice(0, 40) + "...)" };
+    }
+    
+    // 尝试 JSON 解析（kkys 端点返回明文 JSON）
+    try {
+      const json = JSON.parse(strRaw);
+      return { ok: true, type: "json", data: json, server, path, method };
+    } catch (e) {
+      // 不是 JSON，尝试 AES 解密
+    }
+    
+    // 尝试 AES 解密（内容端点返回加密数据）
+    const dec = safeDecrypt(strRaw);
+    if (dec && typeof dec === "object") {
+      return { ok: true, type: "encrypted", data: dec, server, path, method };
+    }
+    
+    // 其他格式响应
+    return { 
+      ok: false, 
+      reason: "非JSON非加密(" + strRaw.slice(0, 60) + "...)" + " len:" + strRaw.length,
+      rawPreview: strRaw.slice(0, 200)
+    };
   } catch (e) {
     const em = (e.message || String(e)).slice(0, 80);
-    return { ok: false, reason: em, server, path, method };
+    if (em.includes("404") || em.includes("not found")) {
+      return { ok: false, reason: "404" };
+    }
+    return { ok: false, reason: em };
   }
 }
 
-// ============ 探测函数 ============
-// 用 Promise.race 并行探测，第一个成功的就返回
 async function probeAll(servers) {
-  const tests = [
+  // 优先试 kkys 路径（明文 JSON）
+  const kkysPaths = [
     { path: "/vod/copyright", params: { appId: APP_ID } },
-    { path: "/vod/copyr", params: { appId: APP_ID } },
     { path: "/vod/history", params: { appId: APP_ID, page: "1" } },
-    { path: "/vod/histo", params: { appId: APP_ID, page: "1" } },
     { path: "/vod/favorite", params: { appId: APP_ID } },
-    { path: "/vod/favor", params: { appId: APP_ID } },
     { path: "/user/login", params: { appId: APP_ID } },
-    { path: "/user/logi", params: { appId: APP_ID } },
     { path: "/user/info", params: { appId: APP_ID } },
     { path: "/app/announcements", params: { appId: APP_ID } },
-    { path: "/app/annou", params: { appId: APP_ID } },
     { path: "/config/unknown", params: { appId: APP_ID } },
   ];
-
-  const allPromises = [];
-  for (const srv of servers) {
-    for (const t of tests) {
-      allPromises.push(tryOneRequest(srv, t.path, "GET", t.params));
-      allPromises.push(tryOneRequest(srv, t.path, "POST", t.params));
-    }
-  }
-
-  // 用 race 方式并行执行，第一个成功的返回
-  // 但由于 Widget 环境可能不支持 Promise.race，我们用手动方式
-  const results = [];
-  const errors = [];
   
-  // 分批并行执行，每批 8 个
-  for (let i = 0; i < allPromises.length; i += 8) {
-    const batch = allPromises.slice(i, i + 8);
-    const batchResults = await Promise.all(batch);
-    for (const r of batchResults) {
-      if (r.ok) return r;
-      if (r.reason) errors.push(r.server + " " + r.method + " " + r.path + " => " + r.reason);
-    }
-    results.push(...batchResults);
-  }
-
-  return { ok: false, errors: errors, totalTried: results.length };
-}
-
-// ============ 尝试提取网站 API 域名 ============
-async function tryExtractFromSite() {
-  const siteUrls = [
-    { url: "https://www.ncat21.com/", label: "ncat21" },
-    { url: "https://www.ncat23.com/", label: "ncat23" },
-    { url: "http://www.ncat21.com/", label: "ncat21-http" },
+  // 内容 API 路径（加密响应）
+  const contentPaths = [
+    { path: "/vod/list", params: { appId: APP_ID, page: "1", size: "10" } },
+    { path: "/vod/home", params: { appId: APP_ID } },
+    { path: "/vod/recommend", params: { appId: APP_ID } },
+    { path: "/vod/category", params: { appId: APP_ID } },
+    { path: "/vod/search", params: { appId: APP_ID, keyword: "test" } },
+    { path: "/vod/detail", params: { appId: APP_ID, id: "1" } },
+    { path: "/app/vod/list", params: { appId: APP_ID, page: "1" } },
+    { path: "/app/vod/home", params: { appId: APP_ID } },
+    { path: "/api/vod/list", params: { appId: APP_ID, page: "1" } },
+    { path: "/api/vod/home", params: { appId: APP_ID } },
+    { path: "/v1/vod/list", params: { appId: APP_ID, page: "1" } },
+    { path: "/v1/vod/home", params: { appId: APP_ID } },
   ];
-  
-  for (const s of siteUrls) {
-    try {
-      const resp = await Widget.http.get(s.url, {
-        headers: Object.assign({}, REQ_HEADERS, { "Accept": "text/html" }),
-        timeout: 10000
-      });
-      const html = String(resp.data);
-      const m = html.match(/whatTMDwhatTMDApiDomain\s*=\s*["']([^"']+)["']/);
-      if (m && m[1]) {
-        return { ok: true, domain: m[1], source: s.label };
+
+  let report = "";
+  let foundJson = [];    // 明文 JSON 结果
+  let foundEncrypted = []; // 加密结果
+  let nonHtmlResults = []; // 非HTML的其他响应
+  let htmlCount = 0;
+  let errorCount = 0;
+  let notFoundCount = 0;
+
+  const allTests = [
+    ...kkysPaths.map(t => ({ ...t, type: "kkys" })),
+    ...contentPaths.map(t => ({ ...t, type: "content" })),
+  ];
+
+  for (const srv of servers) {
+    report += "\n--- " + srv + " ---\n";
+    for (const t of allTests) {
+      for (const method of ["GET", "POST"]) {
+        const r = await tryOneRequest(srv, t.path, method, t.params);
+        if (r.ok) {
+          if (r.type === "json") {
+            foundJson.push(r);
+            report += "  ✓ " + method + " " + t.path + " [JSON] keys:{" + Object.keys(r.data).join(",") + "}\n";
+          } else if (r.type === "encrypted") {
+            foundEncrypted.push(r);
+            report += "  ✓ " + method + " " + t.path + " [加密] keys:{" + Object.keys(r.data).join(",") + "}\n";
+          }
+        } else {
+          if (r.reason && r.reason.startsWith("HTML")) {
+            htmlCount++;
+            if (htmlCount <= 3) report += "  ~ " + method + " " + t.path + " => HTML\n";
+          } else if (r.reason && r.reason === "404") {
+            notFoundCount++;
+          } else if (r.reason && r.reason.startsWith("非JSON")) {
+            nonHtmlResults.push({...r, server: srv, path: t.path, method: method});
+            report += "  ? " + method + " " + t.path + " => " + r.reason + "\n";
+          } else {
+            errorCount++;
+            if (errorCount <= 5) report += "  ✗ " + method + " " + t.path + " => " + (r.reason || "?").slice(0, 60) + "\n";
+          }
+        }
       }
-    } catch (e) {
-      // skip
     }
+    // 如果这一轮找到了加密或JSON结果，继续探测更多
+    if (foundJson.length > 0 || foundEncrypted.length > 0) break;
   }
-  return { ok: false };
+
+  return { 
+    foundJson, foundEncrypted, nonHtmlResults, 
+    htmlCount, errorCount, notFoundCount, 
+    report,
+    totalTests: allTests.length * servers.length * 2
+  };
 }
 
 // ============ 主函数 ============
 async function loadHome() {
-  let report = "===== 网飞猫 v5 诊断 =====\n\n";
+  let report = "===== 网飞猫 v6 精确探测 =====\n\n";
+  
+  report += "【策略】HTTP+签名连接 → 过滤HTML → 寻找JSON/加密数据\n";
+  report += "服务器: " + API_SERVERS.join(", ") + "\n";
+  report += "kkys路径: " + ["copyright","history","favorite","login","info","announcements","config/unknown"].join(",") + "\n";
+  report += "内容路径: vod/list, vod/home, vod/recommend 等\n\n";
 
-  // Step 1: 从网站提取 API 域名
-  report += "【Step 1】尝试从网站提取 API 域名...\n";
-  const siteResult = await tryExtractFromSite();
-  if (siteResult.ok) {
-    report += "  ✓ 从 " + siteResult.source + " 提取: " + siteResult.domain + "\n";
-    // 加入候选列表
-    if (!API_SERVERS.includes(siteResult.domain)) {
-      API_SERVERS.unshift(siteResult.domain);
-    }
-  } else {
-    report += "  ✗ 未能从网站提取 API 域名\n";
-  }
-
-  // Step 2: 先快速测试无签名的根路径，确认连接
-  report += "\n【Step 2】快速连接测试（无签名，仅测连通性）:\n";
-  for (const srv of API_SERVERS.slice(0, 4)) {
-    try {
-      const r = await Widget.http.get(srv + "/", { timeout: 5000 });
-      report += "  ✓ " + srv + "/ → " + String(r.data).slice(0, 60) + "\n";
-    } catch (e) {
-      report += "  ✗ " + srv + "/ → " + (e.message || e).slice(0, 60) + "\n";
-    }
-  }
-
-  // Step 3: 全面探测
-  report += "\n【Step 3】签名 API 探测（各路径 GET/POST）:\n";
   const result = await probeAll(API_SERVERS);
+  report += result.report;
 
-  if (result.ok) {
-    report += "\n✓ 找到工作端点!\n";
-    report += "  服务器: " + result.server + "\n";
-    report += "  方法: " + result.method + "\n";
-    report += "  路径: " + result.path + "\n";
-    if (result.decrypted) {
-      report += "  解密数据: " + JSON.stringify(result.decrypted).slice(0, 500) + "\n";
-    } else {
-      report += "  原始响应: " + result.raw + "\n";
+  report += "\n===== 统计 =====\n";
+  report += "总测试数: ~" + result.totalTests + "\n";
+  report += "HTML响应(跳过): " + result.htmlCount + "\n";
+  report += "404: " + result.notFoundCount + "\n";
+  report += "连接错误: " + result.errorCount + "\n";
+  report += "JSON明文: " + result.foundJson.length + "\n";
+  report += "加密数据: " + result.foundEncrypted.length + "\n";
+  report += "其他非HTML: " + result.nonHtmlResults.length + "\n";
+
+  if (result.foundJson.length > 0) {
+    report += "\n✓ 明文 JSON 端点:\n";
+    for (const r of result.foundJson) {
+      report += "  " + r.method + " " + r.path + " → " + JSON.stringify(r.data).slice(0, 300) + "\n";
     }
-    report += "\n✓ API 连接成功，可以继续开发内容模块。\n";
-    throw new Error(report.slice(0, 5000));
   }
 
-  // 全部失败
-  report += "\n❌ 所有探测均失败（共尝试 " + result.totalTried + " 次）\n";
-  report += "\n前 30 条错误:\n";
-  for (let i = 0; i < Math.min(30, result.errors.length); i++) {
-    report += "  " + (i + 1) + ". " + result.errors[i] + "\n";
+  if (result.foundEncrypted.length > 0) {
+    report += "\n✓ 加密数据端点:\n";
+    for (const r of result.foundEncrypted) {
+      report += "  " + r.method + " " + r.path + " → keys:{" + Object.keys(r.data).join(",") + "}\n";
+    }
   }
-  
-  report += "\n【结论】\n";
-  report += "1. HTTPS 自签名证书可能被 iOS ATS 拦截\n";
-  report += "2. HTTP 明文连接被服务端拒绝\n";
-  report += "3. ncat21.com 有 CDNdefend 反爬保护\n";
-  report += "建议：在 iOS App 的 Info.plist 中添加 ATS 例外:\n";
-  report += "  NSAppTransportSecurity > NSExceptionDomains\n";
-  report += "  添加 43.248.100.69 和 103.194.185.51 允许自签名证书\n";
-  
+
+  if (result.nonHtmlResults.length > 0) {
+    report += "\n? 非HTML非JSON响应(可能需要特殊处理):\n";
+    for (const r of result.nonHtmlResults.slice(0, 10)) {
+      report += "  " + r.method + " " + r.path + " → " + (r.rawPreview || r.reason).slice(0, 120) + "\n";
+    }
+  }
+
+  if (result.foundJson.length === 0 && result.foundEncrypted.length === 0) {
+    report += "\n❌ 未找到 JSON 或加密 API 响应\n";
+    report += "结论: 所有API路径返回HTML(可能是服务器默认页)\n";
+    report += "可能原因: API路径完全变更,或需要不同的Host头/前缀\n";
+  }
+
   throw new Error(report.slice(0, 5000));
 }
 
-// 临时 stubs
+// stubs
 async function loadMovies() { return { items: [] }; }
 async function loadSeries() { return { items: [] }; }
 async function loadAnime() { return { items: [] }; }
@@ -357,9 +392,9 @@ async function search(kw) { return { items: [] }; }
 
 WidgetMetadata = {
   id: "ncat21",
-  title: "网飞猫 ncat21 [诊断v5]",
-  description: "v5:HTTPS优先+HTTP降级+并行探测+网站配置提取",
-  version: "1.5.0-diag5",
+  title: "网飞猫 ncat21 [诊断v6]",
+  description: "v6:HTTP+签名→过滤HTML→精确寻找JSON/加密API",
+  version: "1.6.0-diag6",
   requiredVersion: "0.0.1",
   modules: [
     { id: "home", title: "诊断/首页", functionName: "loadHome", cacheDuration: 60, params: [] },
