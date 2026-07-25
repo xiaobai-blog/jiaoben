@@ -1,4 +1,4 @@
-// 网飞猫 ncat21 v8 - 极简版 无setTimeout无延迟
+// 网飞猫 ncat21 v9 - 抓取根页面HTML+多端口探测
 const HASH = "te@9fs#5tbf8#dx7zw8nx";
 const AES_KEY = "ayt5wy5afwmwrpb19k9s3psx3dymyd0n";
 const AES_IV = "b3t069ijy7pirw0j";
@@ -167,12 +167,15 @@ function apiPost(srv, path, params) {
   }).then(function(resp) { return resp.data; });
 }
 
-function safeDecrypt(raw) {
-  if (!raw) return null;
-  var s = String(raw).replace(/\n/g, "");
-  if (s.length < 5) return null;
-  try { return JSON.parse(aes256CbcDecrypt(s, AES_KEY, AES_IV)); }
-  catch (e) { return null; }
+function plainGet(url) {
+  return Widget.http.get(url, {
+    headers: {
+      "User-Agent": UA,
+      "Accept": "text/html,application/xhtml+xml,*/*",
+      "Accept-Language": "zh-CN,zh;q=0.9"
+    },
+    timeout: 10000
+  }).then(function(resp) { return resp.data; });
 }
 
 function isHtml(raw) {
@@ -183,105 +186,153 @@ function isHtml(raw) {
   return false;
 }
 
-function probeOne(srv, path, method, params) {
-  var fn = method === "GET" ? apiGet : apiPost;
-  return fn(srv, path, params).then(function(raw) {
-    if (!raw) return { ok: false, reason: "null" };
-    var strRaw = String(raw).trim();
-    if (strRaw.length < 2) return { ok: false, reason: "empty" };
-    
-    if (isHtml(raw)) {
-      return { ok: false, reason: "HTML", html: strRaw.slice(0, 1000) };
+// 从HTML中提取JS文件引用和可能的API域名
+function extractRefs(html) {
+  var refs = [];
+  var scriptRe = /src=["']([^"']+\.js[^"']*)["']/gi;
+  var linkRe = /href=["']([^"']+\.css[^"']*)["']/gi;
+  var apiRe = /(?:apiDomain|apiUrl|apiHost|apiServer|baseUrl|baseURL|serverUrl)["']?\s*[:=]\s*["']([^"']+)["']/gi;
+  var domainRe = /(?:https?:\/\/[a-zA-Z0-9.-]+(?::\d+)?\/)/gi;
+  
+  var m;
+  while ((m = scriptRe.exec(html)) !== null) { refs.push("js:" + m[1]); }
+  while ((m = linkRe.exec(html)) !== null) { refs.push("css:" + m[1]); }
+  while ((m = apiRe.exec(html)) !== null) { refs.push("api:" + m[1]); }
+  
+  var domains = {};
+  while ((m = domainRe.exec(html)) !== null) {
+    var d = m[0];
+    if (!domains[d]) { domains[d] = true; refs.push("url:" + d); }
+  }
+  return refs;
+}
+
+// 获取根页面HTML
+var IP1 = "43.248.100.69";
+var IP2 = "103.194.185.51";
+var PORT1 = "51080";
+var PORT2 = "51122";
+var PORT3 = "51172";
+
+var SERVERS = [
+  { id: "A", url: "http://43.248.100.69:51080" },
+  { id: "B", url: "http://43.248.100.69:51122" },
+  { id: "C", url: "http://103.194.185.51:51122" },
+  { id: "D", url: "http://103.194.185.51:51172" },
+];
+
+var QUICK_PATHS = [
+  { path: "/vod/home", params: { appId: APP_ID }, label: "vod/home" },
+  { path: "/vod/list", params: { appId: APP_ID, page: "1" }, label: "vod/list" },
+  { path: "/app/announcements", params: { appId: APP_ID }, label: "announce" },
+];
+
+// Step 1: 抓取51080根页面HTML，提取JS/API引用
+function step1FetchRoot() {
+  return plainGet("http://43.248.100.69:51080/").then(function(html) {
+    if (!html) return "根页面: (null)\n";
+    var s = String(html);
+    var head = s.slice(0, 3000);
+    var refs = extractRefs(head);
+    var report = "--- 根页面 HTML (前3000字) ---\n";
+    report += head + "\n";
+    if (refs.length > 0) {
+      report += "\n--- 提取的JS/CSS/API引用 ---\n";
+      for (var i = 0; i < refs.length; i++) {
+        report += "  " + refs[i] + "\n";
+      }
     }
-    
-    try {
-      var json = JSON.parse(strRaw);
-      return { ok: true, type: "json", data: json };
-    } catch (e) {}
-    
-    var dec = safeDecrypt(strRaw);
-    if (dec && typeof dec === "object") {
-      return { ok: true, type: "encrypted", data: dec };
-    }
-    
-    if (/^[A-Za-z0-9+/=]+$/.test(strRaw) && strRaw.length > 40) {
-      return { ok: false, reason: "base64-unable-decrypt", raw: strRaw.slice(0, 200), len: strRaw.length };
-    }
-    
-    return { ok: false, reason: "unknown-format", raw: strRaw.slice(0, 200) };
+    return report;
   }).catch(function(e) {
-    var em = (e.message || String(e)).slice(0, 80);
-    return { ok: false, reason: em };
+    return "根页面: ERROR - " + (e.message || String(e)).slice(0, 80) + "\n";
   });
 }
 
-var SRV = "http://43.248.100.69:51080";
+// Step 2: 在每个服务器上快速探测3个路径
+function step2ProbeServers() {
+  var report = "";
+  var idx = 0;
+  
+  function nextServer() {
+    if (idx >= SERVERS.length) return report;
+    var srv = SERVERS[idx];
+    report += "\n--- 服务器[" + srv.id + "] " + srv.url + " ---\n";
+    
+    var j = 0;
+    function nextPath() {
+      if (j >= QUICK_PATHS.length) {
+        idx++;
+        return nextServer();
+      }
+      var t = QUICK_PATHS[j];
+      return apiGet(srv.url, t.path, t.params).then(function(raw) {
+        var info = "  GET " + t.path + " => ";
+        if (!raw) { info += "null\n"; } 
+        else {
+          var s = String(raw).trim().slice(0, 150).replace(/\n/g, "\\n");
+          if (isHtml(raw)) { info += "HTML(" + String(raw).length + "b):" + s + "\n"; }
+          else { info += "DATA(" + String(raw).length + "b):" + s + "\n"; }
+        }
+        report += info;
+        j++;
+        return nextPath();
+      }).catch(function(e) {
+        report += "  GET " + t.path + " => ERR:" + (e.message||String(e)).slice(0,60) + "\n";
+        j++;
+        return nextPath();
+      });
+    }
+    return nextPath();
+  }
+  return nextServer();
+}
 
-var TEST_PATHS = [
-  { path: "/vod/copyright", params: { appId: APP_ID }, label: "copyright" },
-  { path: "/vod/history", params: { appId: APP_ID, page: "1" }, label: "history" },
-  { path: "/vod/favorite", params: { appId: APP_ID }, label: "favorite" },
-  { path: "/user/login", params: { appId: APP_ID }, label: "login" },
-  { path: "/user/info", params: { appId: APP_ID }, label: "userInfo" },
-  { path: "/app/announcements", params: { appId: APP_ID }, label: "announcements" },
-  { path: "/config/unknown", params: { appId: APP_ID }, label: "config" },
-  { path: "/vod/list", params: { appId: APP_ID, page: "1", size: "10" }, label: "vod/list" },
-  { path: "/vod/home", params: { appId: APP_ID }, label: "vod/home" },
-  { path: "/vod/recommend", params: { appId: APP_ID }, label: "vod/recommend" },
-  { path: "/vod/category", params: { appId: APP_ID }, label: "vod/category" },
-  { path: "/vod/search", params: { appId: APP_ID, keyword: "test" }, label: "vod/search" },
-  { path: "/vod/detail", params: { appId: APP_ID, id: "1" }, label: "vod/detail" },
-  { path: "/app/vod/list", params: { appId: APP_ID, page: "1" }, label: "app-list" },
-  { path: "/api/vod/list", params: { appId: APP_ID, page: "1" }, label: "api-list" },
-  { path: "/api/vod/home", params: { appId: APP_ID }, label: "api-home" },
+// Step 3: 尝试51080的常见子路径来找到真实API
+var SUB_PATHS = [
+  "/api", "/appapi", "/server", "/service", "/api/v1", "/api/v2",
+  "/ncat", "/ncat/api", "/vodapi", "/ajax", "/ajax.php", "/index.php",
+  "/wp-admin", "/login", "/index", "/portal", "/front", "/web",
 ];
 
-function chainProbe(idx, report, results) {
-  if (idx >= TEST_PATHS.length) {
-    return { report: report, results: results };
+function step3ProbeSubPaths() {
+  var report = "\n--- 51080根路径探测 ---\n";
+  var idx = 0;
+  function next() {
+    if (idx >= SUB_PATHS.length) return report;
+    var p = SUB_PATHS[idx];
+    return plainGet("http://43.248.100.69:51080" + p).then(function(raw) {
+      var info = "  GET " + p + " => ";
+      if (!raw) { info += "null\n"; }
+      else {
+        var s = String(raw).trim().slice(0, 120).replace(/\n/g, "\\n");
+        if (isHtml(raw)) { info += "HTML(" + String(raw).length + "b):" + s + "\n"; }
+        else { info += "DATA(" + String(raw).length + "b):" + s + "\n"; }
+      }
+      report += info;
+      idx++;
+      return next();
+    }).catch(function(e) {
+      report += "  GET " + p + " => ERR:" + (e.message||String(e)).slice(0,60) + "\n";
+      idx++;
+      return next();
+    });
   }
-  var t = TEST_PATHS[idx];
-  return probeOne(SRV, t.path, "GET", t.params).then(function(r1) {
-    report += "  GET  " + t.path + " [" + t.label + "] => " + r1.reason;
-    var hasData = false;
-    if (r1.ok) {
-      report += " [" + r1.type + "] keys:{" + Object.keys(r1.data).join(",") + "}";
-      results.push(r1);
-      hasData = true;
-    } else if (r1.html) {
-      report += " html:" + r1.html.slice(0, 120).replace(/\n/g, "\\n");
-    }
-    report += "\n";
-    return probeOne(SRV, t.path, "POST", t.params);
-  }).then(function(r2) {
-    report += "  POST " + t.path + " [" + t.label + "] => " + r2.reason;
-    if (r2.ok) {
-      report += " [" + r2.type + "] keys:{" + Object.keys(r2.data).join(",") + "}";
-      results.push(r2);
-    } else if (r2.html) {
-      report += " html:" + r2.html.slice(0, 120).replace(/\n/g, "\\n");
-    }
-    report += "\n";
-    return chainProbe(idx + 1, report, results);
-  });
+  return next();
 }
 
 function loadHome() {
-  return chainProbe(0, "", []).then(function(result) {
-    var report = "===== 网飞猫 v8 探测 =====\n\n";
-    report += "服务器: " + SRV + "\n";
-    report += "路径数: " + TEST_PATHS.length + " x GET/POST\n\n";
-    report += result.report;
-    report += "\n===== 汇总 =====\n";
-    report += "有效API: " + result.results.length + "\n";
-    for (var i = 0; i < result.results.length; i++) {
-      var r = result.results[i];
-      report += "  " + r.type + ": " + r.reason + "\n";
-    }
-    if (result.results.length === 0) {
-      report += "\n未找到有效API(非HTML)\n";
-    }
-    throw new Error(report.slice(0, 5000));
+  var finalReport = "===== 网飞猫 v9 多策略探测 =====\n\n";
+  
+  return step1FetchRoot().then(function(r1) {
+    finalReport += r1 + "\n";
+    return step2ProbeServers();
+  }).then(function(r2) {
+    finalReport += r2 + "\n";
+    return step3ProbeSubPaths();
+  }).then(function(r3) {
+    finalReport += r3;
+    finalReport += "\n===== 结束 =====\n";
+    throw new Error(finalReport.slice(0, 5000));
   });
 }
 
@@ -289,14 +340,14 @@ function loadMovies() { return Promise.resolve({ items: [] }); }
 function loadSeries() { return Promise.resolve({ items: [] }); }
 function loadAnime() { return Promise.resolve({ items: [] }); }
 function loadVariety() { return Promise.resolve({ items: [] }); }
-function loadDetail(id) { return Promise.reject(new Error("待端")); }
+function loadDetail(id) { return Promise.reject(new Error("待修复")); }
 function search(kw) { return Promise.resolve({ items: [] }); }
 
 WidgetMetadata = {
   id: "ncat21",
-  title: "网飞猫 ncat21 [v8]",
-  description: "v8:连锁Promise无延时无setTimeout",
-  version: "2.0.0",
+  title: "网飞猫 ncat21 [v9]",
+  description: "v9:抓根HTML+多端口+子路径探测",
+  version: "2.1.0",
   requiredVersion: "0.0.1",
   modules: [
     { id: "home", title: "诊断/首页", functionName: "loadHome", cacheDuration: 60, params: [] },
