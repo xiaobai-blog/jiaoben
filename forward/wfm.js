@@ -1,6 +1,4 @@
-// 网飞猫 ncat21 v7 - 稳健探测
-// 策略：单服务器+延迟+重试+完整响应 → 避免触发限流
-
+// 网飞猫 ncat21 v8 - 极简版 无setTimeout无延迟
 const HASH = "te@9fs#5tbf8#dx7zw8nx";
 const AES_KEY = "ayt5wy5afwmwrpb19k9s3psx3dymyd0n";
 const AES_IV = "b3t069ijy7pirw0j";
@@ -13,7 +11,6 @@ const DEVICE_ID = (function () {
 })();
 const DEVICE_CREATED_AT = String(Date.now());
 
-// ============ crypto ============
 function utf8ToBytes(str) {
   const out = [];
   for (let i = 0; i < str.length; i++) {
@@ -82,8 +79,7 @@ function hmacSha1(msg, key) {
   let k = utf8ToBytes(key);
   if (k.length > block) k = sha1(k);
   while (k.length < block) k.push(0);
-  const oKey = k.map(b => b ^ 0x5c);
-  const iKey = k.map(b => b ^ 0x36);
+  const oKey = k.map(b => b ^ 0x5c), iKey = k.map(b => b ^ 0x36);
   return sha1(oKey.concat(sha1(iKey.concat(utf8ToBytes(msg))))).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 const SBOX = [0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16];
@@ -124,184 +120,183 @@ function aes256CbcDecrypt(base64Cipher, keyStr, ivStr) {
     for (let i = 0; i < 16; i++) out.push(dec[i] ^ prev[i]);
     prev = block.slice();
   }
-  let len = out.length;
-  const pad = out[len - 1];
+  let len = out.length, pad = out[len - 1];
   if (pad > 0 && pad <= 16) len -= pad;
   return bytesToUtf8(out.slice(0, len));
 }
-// Widget环境不支持setTimeout，用忙等替代
-function busyWait(ms) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) { /* busy wait */ }
-}
 
-// ============ 签名 & 请求 ============
 function makeSign(urlPath, paramsObj, method) {
   method = method || "GET";
   const ts = Date.now();
-  const queryString = Object.keys(paramsObj).sort().map(k => k + "=" + paramsObj[k]).join("&");
+  const queryString = Object.keys(paramsObj).sort().map(function(k) { return k + "=" + paramsObj[k]; }).join("&");
   const prefix = "appId=" + APP_ID + "&deviceCreatedAt=" + DEVICE_CREATED_AT + "&deviceId=" + DEVICE_ID;
   const msg = method + "|" + urlPath + "|" + queryString + "|" + ts + "|" + prefix + "|";
-  return { ts: String(ts), sign: hmacSha1(msg, HASH), queryString };
+  return { ts: String(ts), sign: hmacSha1(msg, HASH), queryString: queryString };
 }
 
-const UA = "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36";
+var UA = "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36";
 
-async function apiGet(srv, path, params) {
-  const { ts, sign, queryString } = makeSign(path, params, "GET");
-  const url = srv + path + (queryString ? "?" + queryString : "");
-  const resp = await Widget.http.get(url, {
+function apiGet(srv, path, params) {
+  var si = makeSign(path, params, "GET");
+  var url = srv + path + (si.queryString ? "?" + si.queryString : "");
+  return Widget.http.get(url, {
     headers: {
       "User-Agent": UA,
       "Accept": "application/json, text/plain, */*",
       "Accept-Language": "zh-CN,zh;q=0.9",
-      "ts": ts, "sign": sign
+      "ts": si.ts,
+      "sign": si.sign
     },
     timeout: 10000
-  });
-  return resp.data;
+  }).then(function(resp) { return resp.data; });
 }
 
-async function apiPost(srv, path, params) {
-  const { ts, sign } = makeSign(path, params, "POST");
-  const url = srv + path;
-  const resp = await Widget.http.post(url, JSON.stringify(params), {
+function apiPost(srv, path, params) {
+  var si = makeSign(path, params, "POST");
+  var url = srv + path;
+  return Widget.http.post(url, JSON.stringify(params), {
     headers: {
       "User-Agent": UA,
       "Accept": "application/json, text/plain, */*",
       "Accept-Language": "zh-CN,zh;q=0.9",
       "Content-Type": "application/json;charset=UTF-8",
-      "ts": ts, "sign": sign
+      "ts": si.ts,
+      "sign": si.sign
     },
     timeout: 10000
-  });
-  return resp.data;
+  }).then(function(resp) { return resp.data; });
 }
 
-// ============ 带重试的请求 ============
-async function tryWithRetry(srv, path, method, params, maxRetries) {
-  maxRetries = maxRetries || 2;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (attempt > 0) busyWait(500); // 重试前等待500ms
+function safeDecrypt(raw) {
+  if (!raw) return null;
+  var s = String(raw).replace(/\n/g, "");
+  if (s.length < 5) return null;
+  try { return JSON.parse(aes256CbcDecrypt(s, AES_KEY, AES_IV)); }
+  catch (e) { return null; }
+}
+
+function isHtml(raw) {
+  if (!raw) return true;
+  var s = String(raw).trim();
+  if (s.length < 2) return true;
+  if (s.indexOf("<!DOCTYPE") === 0 || s.indexOf("<html") === 0 || s.indexOf("<HTML") === 0) return true;
+  return false;
+}
+
+function probeOne(srv, path, method, params) {
+  var fn = method === "GET" ? apiGet : apiPost;
+  return fn(srv, path, params).then(function(raw) {
+    if (!raw) return { ok: false, reason: "null" };
+    var strRaw = String(raw).trim();
+    if (strRaw.length < 2) return { ok: false, reason: "empty" };
+    
+    if (isHtml(raw)) {
+      return { ok: false, reason: "HTML", html: strRaw.slice(0, 1000) };
+    }
+    
     try {
-      let raw;
-      if (method === "GET") raw = await apiGet(srv, path, params);
-      else raw = await apiPost(srv, path, params);
-      
-      if (!raw) return { ok: false, reason: "空响应" };
-      const strRaw = String(raw).trim();
-      if (strRaw.length < 2) return { ok: false, reason: "空响应" };
-      
-      // 返回完整原始数据
-      return { ok: true, raw: strRaw, rawLen: strRaw.length, retries: attempt };
-    } catch (e) {
-      const em = (e.message || String(e)).slice(0, 100);
-      if (attempt >= maxRetries) {
-        return { ok: false, reason: em, retries: attempt };
-      }
+      var json = JSON.parse(strRaw);
+      return { ok: true, type: "json", data: json };
+    } catch (e) {}
+    
+    var dec = safeDecrypt(strRaw);
+    if (dec && typeof dec === "object") {
+      return { ok: true, type: "encrypted", data: dec };
     }
-  }
-  return { ok: false, reason: "未知错误" };
+    
+    if (/^[A-Za-z0-9+/=]+$/.test(strRaw) && strRaw.length > 40) {
+      return { ok: false, reason: "base64-unable-decrypt", raw: strRaw.slice(0, 200), len: strRaw.length };
+    }
+    
+    return { ok: false, reason: "unknown-format", raw: strRaw.slice(0, 200) };
+  }).catch(function(e) {
+    var em = (e.message || String(e)).slice(0, 80);
+    return { ok: false, reason: em };
+  });
 }
 
-// ============ 主探测 ============
-async function loadHome() {
-  let report = "===== 网飞猫 v7 稳健探测 =====\n\n";
-  report += "策略：单服务器(43.248.100.69:51080) + 延迟 + 重试\n";
-  report += "路径范围：kkys路径 + 内容API路径 + 根路径\n\n";
+var SRV = "http://43.248.100.69:51080";
 
-  const SRV = "http://43.248.100.69:51080";
-  
-  // 测试路径列表（带备注）
-  const tests = [
-    // 根路径 - 看服务器响应什么
-    { path: "/", params: {}, note: "根路径", methods: ["GET"] },
-    // kkys 路径
-    { path: "/vod/copyright", params: { appId: APP_ID }, note: "版权", methods: ["GET","POST"] },
-    { path: "/vod/history", params: { appId: APP_ID, page: "1" }, note: "历史", methods: ["GET","POST"] },
-    { path: "/user/login", params: { appId: APP_ID }, note: "登录", methods: ["GET","POST"] },
-    { path: "/user/info", params: { appId: APP_ID }, note: "用户信息", methods: ["GET","POST"] },
-    // 内容 API
-    { path: "/vod/list", params: { appId: APP_ID, page: "1", size: "10" }, note: "列表", methods: ["GET","POST"] },
-    { path: "/vod/home", params: { appId: APP_ID }, note: "首页", methods: ["GET","POST"] },
-    { path: "/vod/recommend", params: { appId: APP_ID }, note: "推荐", methods: ["GET","POST"] },
-    // 变体路径
-    { path: "/app/vod/list", params: { appId: APP_ID, page: "1" }, note: "app列表", methods: ["GET"] },
-    { path: "/api/vod/list", params: { appId: APP_ID, page: "1" }, note: "api列表", methods: ["GET"] },
-    // ncat21 网站可能有的路径
-    { path: "/api/getAppUpdate", params: {}, note: "更新检查", methods: ["GET"] },
-  ];
+var TEST_PATHS = [
+  { path: "/vod/copyright", params: { appId: APP_ID }, label: "copyright" },
+  { path: "/vod/history", params: { appId: APP_ID, page: "1" }, label: "history" },
+  { path: "/vod/favorite", params: { appId: APP_ID }, label: "favorite" },
+  { path: "/user/login", params: { appId: APP_ID }, label: "login" },
+  { path: "/user/info", params: { appId: APP_ID }, label: "userInfo" },
+  { path: "/app/announcements", params: { appId: APP_ID }, label: "announcements" },
+  { path: "/config/unknown", params: { appId: APP_ID }, label: "config" },
+  { path: "/vod/list", params: { appId: APP_ID, page: "1", size: "10" }, label: "vod/list" },
+  { path: "/vod/home", params: { appId: APP_ID }, label: "vod/home" },
+  { path: "/vod/recommend", params: { appId: APP_ID }, label: "vod/recommend" },
+  { path: "/vod/category", params: { appId: APP_ID }, label: "vod/category" },
+  { path: "/vod/search", params: { appId: APP_ID, keyword: "test" }, label: "vod/search" },
+  { path: "/vod/detail", params: { appId: APP_ID, id: "1" }, label: "vod/detail" },
+  { path: "/app/vod/list", params: { appId: APP_ID, page: "1" }, label: "app-list" },
+  { path: "/api/vod/list", params: { appId: APP_ID, page: "1" }, label: "api-list" },
+  { path: "/api/vod/home", params: { appId: APP_ID }, label: "api-home" },
+];
 
-  let successCount = 0;
-  let failCount = 0;
-
-  for (const t of tests) {
-    busyWait(300); // 每个请求间隔300ms避免限流
-    for (const method of t.methods) {
-      report += "[" + t.note + "] " + method + " " + t.path + " ... ";
-      const r = await tryWithRetry(SRV, t.path, method, t.params, 1);
-      if (r.ok) {
-        successCount++;
-        report += "✓ (len:" + r.rawLen + (r.retries > 0 ? " retry:" + r.retries : "") + ")\n";
-        // 显示响应内容
-        if (r.raw.startsWith("<!DOCTYPE") || r.raw.startsWith("<html")) {
-          report += "    [HTML] " + r.raw.slice(0, 300).replace(/\n/g, "\\n") + "\n";
-        } else if (r.raw.startsWith("{") || r.raw.startsWith("[")) {
-          report += "    [JSON] " + r.raw.slice(0, 500).replace(/\n/g, "\\n") + "\n";
-          // 尝试解析
-          try {
-            const parsed = JSON.parse(r.raw);
-            report += "    keys: {" + Object.keys(parsed).join(",") + "}\n";
-            if (parsed.data) {
-              report += "    data类型: " + (Array.isArray(parsed.data) ? "Array[" + parsed.data.length + "]" : typeof parsed.data) + "\n";
-            }
-          } catch(e) {}
-        } else if (/^[A-Za-z0-9+/=]+$/.test(r.raw) && r.raw.length > 40) {
-          report += "    [Base64] " + r.raw.slice(0, 100) + "...(len:" + r.raw.length + ")\n";
-          // 尝试 AES 解密
-          try {
-            const json = aes256CbcDecrypt(r.raw, AES_KEY, AES_IV);
-            const parsed = JSON.parse(json);
-            report += "    ✓ AES解密成功! keys: {" + Object.keys(parsed).join(",") + "}\n";
-            report += "    data: " + JSON.stringify(parsed).slice(0, 300) + "\n";
-          } catch(e) {
-            report += "    ✗ AES解密失败\n";
-          }
-        } else {
-          report += "    [OTHER:" + r.raw.slice(0, 2).charCodeAt(0) + "] " + r.raw.slice(0, 200).replace(/\n/g, "\\n") + "\n";
-        }
-      } else {
-        failCount++;
-        report += "✗ " + r.reason + "\n";
-      }
+function chainProbe(idx, report, results) {
+  if (idx >= TEST_PATHS.length) {
+    return { report: report, results: results };
+  }
+  var t = TEST_PATHS[idx];
+  return probeOne(SRV, t.path, "GET", t.params).then(function(r1) {
+    report += "  GET  " + t.path + " [" + t.label + "] => " + r1.reason;
+    var hasData = false;
+    if (r1.ok) {
+      report += " [" + r1.type + "] keys:{" + Object.keys(r1.data).join(",") + "}";
+      results.push(r1);
+      hasData = true;
+    } else if (r1.html) {
+      report += " html:" + r1.html.slice(0, 120).replace(/\n/g, "\\n");
     }
-  }
-
-  report += "\n===== 结果 =====\n";
-  report += "成功: " + successCount + ", 失败: " + failCount + "\n";
-
-  if (successCount === 0) {
-    report += "\n❌ 所有请求均失败\n";
-    report += "可能原因: 服务器不稳定/限流/需要VPN\n";
-    report += "建议: 等待几分钟后重试\n";
-  }
-
-  throw new Error(report.slice(0, 5000));
+    report += "\n";
+    return probeOne(SRV, t.path, "POST", t.params);
+  }).then(function(r2) {
+    report += "  POST " + t.path + " [" + t.label + "] => " + r2.reason;
+    if (r2.ok) {
+      report += " [" + r2.type + "] keys:{" + Object.keys(r2.data).join(",") + "}";
+      results.push(r2);
+    } else if (r2.html) {
+      report += " html:" + r2.html.slice(0, 120).replace(/\n/g, "\\n");
+    }
+    report += "\n";
+    return chainProbe(idx + 1, report, results);
+  });
 }
 
-// stubs
-async function loadMovies() { return { items: [] }; }
-async function loadSeries() { return { items: [] }; }
-async function loadAnime() { return { items: [] }; }
-async function loadVariety() { return { items: [] }; }
-async function loadDetail(id) { throw new Error("待端点确认"); }
-async function search(kw) { return { items: [] }; }
+function loadHome() {
+  return chainProbe(0, "", []).then(function(result) {
+    var report = "===== 网飞猫 v8 探测 =====\n\n";
+    report += "服务器: " + SRV + "\n";
+    report += "路径数: " + TEST_PATHS.length + " x GET/POST\n\n";
+    report += result.report;
+    report += "\n===== 汇总 =====\n";
+    report += "有效API: " + result.results.length + "\n";
+    for (var i = 0; i < result.results.length; i++) {
+      var r = result.results[i];
+      report += "  " + r.type + ": " + r.reason + "\n";
+    }
+    if (result.results.length === 0) {
+      report += "\n未找到有效API(非HTML)\n";
+    }
+    throw new Error(report.slice(0, 5000));
+  });
+}
+
+function loadMovies() { return Promise.resolve({ items: [] }); }
+function loadSeries() { return Promise.resolve({ items: [] }); }
+function loadAnime() { return Promise.resolve({ items: [] }); }
+function loadVariety() { return Promise.resolve({ items: [] }); }
+function loadDetail(id) { return Promise.reject(new Error("待端")); }
+function search(kw) { return Promise.resolve({ items: [] }); }
 
 WidgetMetadata = {
   id: "ncat21",
-  title: "网飞猫 ncat21 [诊断v7b]",
-  description: "v7b:修复setTimeout→busyWait",
-  version: "1.7.1-diag7b",
+  title: "网飞猫 ncat21 [v8]",
+  description: "v8:连锁Promise无延时无setTimeout",
+  version: "2.0.0",
   requiredVersion: "0.0.1",
   modules: [
     { id: "home", title: "诊断/首页", functionName: "loadHome", cacheDuration: 60, params: [] },
