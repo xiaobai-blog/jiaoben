@@ -299,9 +299,9 @@ async function search(kw) { return { items: [] }; }
 
 WidgetMetadata = {
   id: "ncat21",
-  title: "网飞猫 ncat21 [诊断v7]",
-  description: "v7:单服务器+延迟+重试+完整响应→避免限流",
-  version: "1.7.0-diag7",
+  title: "网飞猫 ncat21 [诊断v7b]",
+  description: "v7b:修复setTimeout→busyWait",
+  version: "1.7.1-diag7b",
   requiredVersion: "0.0.1",
   modules: [
     { id: "home", title: "诊断/首页", functionName: "loadHome", cacheDuration: 60, params: [] },
