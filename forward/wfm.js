@@ -1,8 +1,8 @@
-// 网飞猫 ncat21 影视模块 - 诊断版 v3
-// 改进：1) 动态从 ncat21.com 提取 API 域名（自适应 IP 变更）
-//       2) 多个 IP/端口候选
-//       3) 同时尝试 GET/POST
-//       4) 先验证 kkys 确认路径（如 copyright），确认 API 正常后再探测内容端点
+// 网飞猫 ncat21 影视模块 - 诊断版 v4
+// 关键修复：使用 http:// 而非 https://（API 端口 51080/51122/51172 是 HTTP 端口）
+// 改进：1) http:// 请求 + 签名 探测所有已知路径
+//       2) 探测网站 HTML 也改用 http:// 尝试
+//       3) 增加更多路径变体
 
 const HASH = "te@9fs#5tbf8#dx7zw8nx";
 const AES_KEY = "ayt5wy5afwmwrpb19k9s3psx3dymyd0n";
@@ -204,13 +204,14 @@ async function extractApiDomain() {
   let report = "";
   const candidates = [];
 
-  // 尝试从网站 HTML 提取
+  // 尝试从网站 HTML 提取 - 先用 http://
   try {
-    report += "[1] 尝试从 www.ncat21.com 提取 whatTMDwhatTMDApiDomain...\n";
-    const resp = await Widget.http.get("https://www.ncat21.com/", {
+    report += "[1] 尝试从 http://www.ncat21.com 提取 whatTMDwhatTMDApiDomain...\n";
+    const resp = await Widget.http.get("http://www.ncat21.com/", {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0",
-        "Accept": "text/html,application/xhtml+xml"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
       },
       timeout: 15000
     });
@@ -232,11 +233,10 @@ async function extractApiDomain() {
     report += "  ✗ 获取网站失败: " + (e.message || String(e)).slice(0, 100) + "\n";
   }
 
-  // 其他可能站点
+  // 其他可能站点 - 也用 http://
   const siteUrls = [
-    "https://www.ncat21.com/",
-    "https://ncat21.com/",
-    "https://103.194.185.51:51122/",
+    "http://ncat21.com/",
+    "http://103.194.185.51:51122/",
   ];
   
   for (const url of siteUrls) {
@@ -257,11 +257,13 @@ async function extractApiDomain() {
     }
   }
 
-  // 后备：旧的已知 IP 和新的候选
+  // 后备：使用 http://（这些是 HTTP 端口，非 HTTPS）
   const fallbacks = [
-    "https://43.248.100.69:51080",
-    "https://103.194.185.51:51122",
-    "https://103.194.185.51:51172",
+    "http://43.248.100.69:51080",
+    "http://103.194.185.51:51122",
+    "http://103.194.185.51:51172",
+    "http://43.248.100.69:51030",
+    "http://43.248.100.69:51050",
   ];
   for (const fb of fallbacks) {
     if (!candidates.includes(fb)) candidates.push(fb);
@@ -368,8 +370,8 @@ async function loadHome() {
     
     report += "\n【Step 4】尝试 ncat21.com 页面请求详情:\n";
     try {
-      const r = await Widget.http.get("https://www.ncat21.com/", {
-        headers: { "User-Agent": "Mozilla/5.0 Chrome/120.0" },
+      const r = await Widget.http.get("http://www.ncat21.com/", {
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0", "Accept": "text/html" },
         timeout: 15000
       });
       const html = String(r.data).slice(0, 3000);
@@ -411,9 +413,9 @@ async function search(kw) { return { items: [] }; }
 
 WidgetMetadata = {
   id: "ncat21",
-  title: "网飞猫 ncat21 [诊断v3]",
-  description: "v3:动态获取API域名+多候补+GET/POST双试",
-  version: "1.4.0-diag3",
+  title: "网飞猫 ncat21 [诊断v4]",
+  description: "v4:用http://替代https://(SSL修复)+更多端口",
+  version: "1.4.1-diag4",
   requiredVersion: "0.0.1",
   modules: [
     { id: "home", title: "诊断/首页", functionName: "loadHome", cacheDuration: 60, params: [] },
