@@ -1,9 +1,9 @@
 WidgetMetadata = {
   id: "forward.txh",
   title: "糖心",
-  version: "3.4.0",
+  version: "3.5.0",
   requiredVersion: "0.0.1",
-  description: "糖心视频 — 直连官方 API，自动获取游客 Token。播放通过 midorii.cc 代理获取完整视频（跳过 VIP/预览限制）。封面图来自 CDN 镜像。如加载失败请在下方手动填写 Token。",
+  description: "糖心视频 — 直连官方 API，自动获取游客 Token。播放通过 midorii.cc 代理获取完整视频（跳过 VIP/预览限制）。封面图通过 .bnc 解密代理显示（AES-128-ECB）。如加载失败请在下方手动填写 Token。",
   author: "Forward",
   site: "https://txh068.com",
   detailCacheDuration: 60,
@@ -17,102 +17,47 @@ WidgetMetadata = {
   ],
   modules: [
     {
-      id: "loadList",
-      title: "最新",
+      id: "videoList",
+      title: "视频",
       functionName: "loadList",
       cacheDuration: 300,
       params: [
         { name: "page", title: "页码", type: "page" },
+        {
+          name: "type",
+          title: "分类",
+          type: "select",
+          defaultValue: "time",
+          options: [
+            { value: "time", title: "最新" },
+            { value: "hot", title: "最热" },
+            { value: "views", title: "播放最多" },
+            { value: "score", title: "评分最高" },
+            { value: "collect", title: "收藏最多" },
+            { value: "daily", title: "每日精选" },
+            { value: "recommend", title: "推荐" },
+          ],
+        },
       ],
     },
     {
-      id: "hot",
-      title: "最热",
-      functionName: "loadList",
-      cacheDuration: 300,
-      params: [
-        { name: "page", title: "页码", type: "page" },
-        { name: "type", title: "排序", type: "input", defaultValue: "hot", hidden: true },
-      ],
-    },
-    {
-      id: "views",
-      title: "播放最多",
-      functionName: "loadList",
-      cacheDuration: 300,
-      params: [
-        { name: "page", title: "页码", type: "page" },
-        { name: "type", title: "排序", type: "input", defaultValue: "views", hidden: true },
-      ],
-    },
-    {
-      id: "score",
-      title: "评分最高",
-      functionName: "loadList",
-      cacheDuration: 300,
-      params: [
-        { name: "page", title: "页码", type: "page" },
-        { name: "type", title: "排序", type: "input", defaultValue: "score", hidden: true },
-      ],
-    },
-    {
-      id: "collect",
-      title: "收藏最多",
-      functionName: "loadList",
-      cacheDuration: 300,
-      params: [
-        { name: "page", title: "页码", type: "page" },
-        { name: "type", title: "排序", type: "input", defaultValue: "collect", hidden: true },
-      ],
-    },
-    {
-      id: "daily",
-      title: "每日精选",
-      functionName: "loadList",
-      cacheDuration: 300,
-      params: [
-        { name: "page", title: "页码", type: "page" },
-        { name: "type", title: "排序", type: "input", defaultValue: "daily", hidden: true },
-      ],
-    },
-    {
-      id: "recommend",
-      title: "推荐",
-      functionName: "loadList",
-      cacheDuration: 300,
-      params: [
-        { name: "page", title: "页码", type: "page" },
-        { name: "type", title: "排序", type: "input", defaultValue: "recommend", hidden: true },
-      ],
-    },
-    {
-      id: "rankMovie",
-      title: "视频榜",
+      id: "ranking",
+      title: "排行榜",
       functionName: "loadRank",
       cacheDuration: 300,
       params: [
         { name: "page", title: "页码", type: "page" },
-        { name: "rankType", title: "排行类型", type: "input", defaultValue: "movie", hidden: true },
-      ],
-    },
-    {
-      id: "rankOriginal",
-      title: "原创榜",
-      functionName: "loadRank",
-      cacheDuration: 300,
-      params: [
-        { name: "page", title: "页码", type: "page" },
-        { name: "rankType", title: "排行类型", type: "input", defaultValue: "original", hidden: true },
-      ],
-    },
-    {
-      id: "rankBuy",
-      title: "解锁榜",
-      functionName: "loadRank",
-      cacheDuration: 300,
-      params: [
-        { name: "page", title: "页码", type: "page" },
-        { name: "rankType", title: "排行类型", type: "input", defaultValue: "movieBuy", hidden: true },
+        {
+          name: "rankType",
+          title: "排行",
+          type: "select",
+          defaultValue: "movie",
+          options: [
+            { value: "movie", title: "视频榜" },
+            { value: "original", title: "原创榜" },
+            { value: "movieBuy", title: "解锁榜" },
+          ],
+        },
       ],
     },
   ],
@@ -515,11 +460,15 @@ function mapVideoItem(raw) {
   var id = raw.id || raw.movie_id;
   var videoId = String(id);
 
-  // Cover image: txh068.com's .bnc images are encrypted (not standard JPEG/PNG)
-  // Use hls_proxy.js /img/{videoId} endpoint which fetches t.5gcdn.xyz cover.jpg with Referer
-  // Falls back to direct CDN URL (requires Referer header in item.headers)
-  var proxyCover = "http://localhost:8888/img/" + videoId;
-  var cdnCover = CDN_BASE + "/" + videoId + "/cover.jpg";
+  // Cover image: txh068.com returns .bnc encrypted images (AES-128-ECB)
+  // hls_proxy.js /bnc endpoint fetches + decrypts them to standard JPEG
+  // Falls back to CDN cover.jpg if .bnc URL is missing
+  var proxyCover = "";
+  if (raw.img) {
+    proxyCover = "http://localhost:8888/bnc?url=" + encodeURIComponent(raw.img);
+  } else {
+    proxyCover = "http://localhost:8888/img/" + videoId;
+  }
 
   return {
     id: videoId,
@@ -528,7 +477,7 @@ function mapVideoItem(raw) {
     posterPath: proxyCover,
     backdropPath: proxyCover,
     coverUrl: proxyCover,
-    imageUrl: cdnCover,
+    imageUrl: proxyCover,
     rating: raw.score ? parseFloat(raw.score) : undefined,
     durationText: raw.duration || "",
     duration: raw.duration_time ? parseInt(raw.duration_time, 10) : undefined,
@@ -545,6 +494,15 @@ function mapDetail(raw) {
 
   item.description = raw.description || raw.content || "";
 
+  // Use .bnc decrypted image for detail page
+  if (raw.img) {
+    var bncCover = "http://localhost:8888/bnc?url=" + encodeURIComponent(raw.img);
+    item.posterPath = bncCover;
+    item.backdropPath = bncCover;
+    item.coverUrl = bncCover;
+    item.imageUrl = bncCover;
+  }
+
   if (raw.tags && raw.tags.length) {
     item.genreItems = raw.tags.map(function (t) {
       return { id: String(t.id || ""), title: (t.name || "").trim() };
@@ -552,10 +510,14 @@ function mapDetail(raw) {
   }
 
   if (raw.nickname) {
+    var avatarUrl = "";
+    if (raw.headico) {
+      avatarUrl = "http://localhost:8888/bnc?url=" + encodeURIComponent(raw.headico);
+    }
     item.peoples = [{
       id: String(raw.user_id || raw.nickname || ""),
       title: raw.nickname || "",
-      avatar: raw.headico || "",
+      avatar: avatarUrl,
       role: "UP主",
     }];
   }
@@ -847,11 +809,7 @@ async function loadDetail(link) {
       throw new Error("无法解析视频数据");
     }
 
-    // Use proxy cover as posterPath (standard JPEG via hls_proxy.js)
-    var proxyCover = "http://localhost:8888/img/" + videoId;
-    item.posterPath = proxyCover;
-    item.backdropPath = proxyCover;
-    item.coverUrl = proxyCover;
+    // Use .bnc decrypted image (already set in mapDetail)
     item.headers = { Referer: CDN_REFERER };
 
     // Try midorii.cc for full video (no preview restriction)
