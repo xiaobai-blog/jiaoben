@@ -1,12 +1,20 @@
 WidgetMetadata = {
   id: "forward.txh",
   title: "糖心",
-  version: "2.0.1",
+  version: "3.0.0",
   requiredVersion: "0.0.1",
-  description: "糖心视频 — 纯 Worker 代扫描实现，播放直接获取完整 m3u8。",
+  description: "糖心视频 — 直连官方 API。自动获取游客 Token，如失败请在下方手动填写。Token 获取方式：浏览器登录 txh068.com → F12 → Application → Local Storage → 复制 fuck 的值。",
   author: "Forward",
   site: "https://txh068.com",
   detailCacheDuration: 60,
+  globalParams: [
+    {
+      name: "token",
+      title: "Token（可选，自动获取失败时填写）",
+      type: "input",
+      description: "留空则自动获取游客Token。如自动获取失败，请登录 txh068.com 后从 localStorage 复制 fuck 的值。",
+    },
+  ],
   modules: [
     {
       id: "loadList",
@@ -30,12 +38,10 @@ WidgetMetadata = {
 
 // ======================== Constants ========================
 var AES_KEY = "fd14f9f8e38808fa";
-var SIGN_KEY = "baby99119900";
-var WORKER_URL = "https://tx.zzxu.de";
+var API_BASE = "https://tth.txh069.com/h5";
 var BASE_URL = "https://tth.txh069.com";
-var PAGE_SIZE = 12;
 
-// ======================== AES-128-ECB (compact) ========================
+// ======================== AES-128-ECB ========================
 var SBOX = [
   0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
   0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
@@ -99,6 +105,17 @@ function bytesToStr(b) {
 }
 
 var B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+function b64encode(bytes) {
+  var s = "";
+  for (var i = 0; i < bytes.length; i += 3) {
+    var a = bytes[i] << 16 | (bytes[i+1] || 0) << 8 | (bytes[i+2] || 0);
+    s += B64[(a >> 18) & 63];
+    s += B64[(a >> 12) & 63];
+    s += i + 1 < bytes.length ? B64[(a >> 6) & 63] : "=";
+    s += i + 2 < bytes.length ? B64[a & 63] : "=";
+  }
+  return s;
+}
 function b64decode(s) {
   s = s.replace(/[^A-Za-z0-9+/]/g, "");
   var b = [];
@@ -153,82 +170,175 @@ function aesDecryptBlock(block, w) {
   return s;
 }
 
+function aesEncryptBlock(block, w) {
+  var s = block.slice();
+  for (var r = 0; r < 4; r++) for (var c = 0; c < 4; c++) s[r + 4*c] ^= w[c][r];
+  for (var rd = 1; rd <= 9; rd++) {
+    for (var i = 0; i < 16; i++) s[i] = SBOX[s[i]];
+    var t = s.slice();
+    for (var r = 0; r < 4; r++) for (var c = 0; c < 4; c++) s[r + 4*c] = t[(r+c) % 4 + 4*c];
+    for (var c = 0; c < 4; c++) {
+      var a = [s[4*c], s[4*c+1], s[4*c+2], s[4*c+3]];
+      s[4*c]   = gmul(a[0],2) ^ gmul(a[1],3) ^ a[2] ^ a[3];
+      s[4*c+1] = a[0] ^ gmul(a[1],2) ^ gmul(a[2],3) ^ a[3];
+      s[4*c+2] = a[0] ^ a[1] ^ gmul(a[2],2) ^ gmul(a[3],3);
+      s[4*c+3] = gmul(a[0],3) ^ a[1] ^ a[2] ^ gmul(a[3],2);
+    }
+    for (var r = 0; r < 4; r++) for (var c = 0; c < 4; c++) s[r + 4*c] ^= w[4*rd + c][r];
+  }
+  for (var i = 0; i < 16; i++) s[i] = SBOX[s[i]];
+  var t = s.slice();
+  for (var r = 0; r < 4; r++) for (var c = 0; c < 4; c++) s[r + 4*c] = t[(r+c) % 4 + 4*c];
+  for (var r = 0; r < 4; r++) for (var c = 0; c < 4; c++) s[r + 4*c] ^= w[40 + c][r];
+  return s;
+}
+
+function pkcs7Pad(b) {
+  var pad = 16 - (b.length % 16);
+  for (var i = 0; i < pad; i++) b.push(pad);
+  return b;
+}
 function pkcs7Unpad(b) {
   if (b.length === 0) return b;
   var pad = b[b.length - 1];
-  if (pad < 1 || pad > 16) throw new Error("Invalid PKCS7 padding");
+  if (pad < 1 || pad > 16) return b;
   return b.slice(0, b.length - pad);
 }
 
 var _expandedKey = null;
-function getExpandedKey() {
+var _expandedDecKey = null;
+function getEncKey() {
   if (!_expandedKey) _expandedKey = keyExpansion(strToBytes(AES_KEY));
   return _expandedKey;
 }
 
-function aesEcbDecrypt(cipherBytes) {
-  var w = getExpandedKey();
+function aesEncrypt(obj) {
+  var bytes = strToBytes(JSON.stringify(obj));
+  bytes = pkcs7Pad(bytes);
+  var w = getEncKey();
+  var out = [];
+  for (var i = 0; i < bytes.length; i += 16) {
+    var block = bytes.slice(i, i + 16);
+    var enc = aesEncryptBlock(block, w);
+    for (var j = 0; j < 16; j++) out.push(enc[j]);
+  }
+  return b64encode(out);
+}
+
+function aesDecryptB64(b64Str) {
+  var cipherBytes = b64decode(b64Str);
+  var w = getEncKey();
   var out = [];
   for (var i = 0; i < cipherBytes.length; i += 16) {
     var block = cipherBytes.slice(i, i + 16);
     var dec = aesDecryptBlock(block, w);
     for (var j = 0; j < 16; j++) out.push(dec[j]);
   }
-  return pkcs7Unpad(out);
+  out = pkcs7Unpad(out);
+  return JSON.parse(bytesToStr(out));
 }
 
-function decryptB64(b64Str) {
-  var cipherBytes = b64decode(b64Str);
-  var plainBytes = aesEcbDecrypt(cipherBytes);
-  var jsonStr = bytesToStr(plainBytes);
-  return JSON.parse(jsonStr);
-}
+// ======================== Token / DeviceId Management ========================
 
-// ======================== MD5 (for Worker sign) ========================
-function md5(s) {
-  function rh(n) { var s2 = "", j; for (j = 0; j <= 3; j++) s2 += ((n >> (j * 8 + 4)) & 0x0f).toString(16) + ((n >> (j * 8)) & 0x0f).toString(16); return s2; }
-  function ad(x, y) { var l = (x & 0xffff) + (y & 0xffff); var m = (x >> 16) + (y >> 16) + (l >> 16); return (m << 16) | (l & 0xffff); }
-  function rl(n, c) { return (n << c) | (n >>> (32 - c)); }
-  function cm(q, a, b, x, s2, t) { return ad(rl(ad(ad(a, q), ad(x, t)), s2), b); }
-  function ff(a, b, c, d, x, s2, t) { return cm((b & c) | (~b & d), a, b, x, s2, t); }
-  function gg(a, b, c, d, x, s2, t) { return cm((b & d) | (c & ~d), a, b, x, s2, t); }
-  function hh(a, b, c, d, x, s2, t) { return cm(b ^ c ^ d, a, b, x, s2, t); }
-  function ii(a, b, c, d, x, s2, t) { return cm(c ^ (b | ~d), a, b, x, s2, t); }
-  function cv(s2) {
-    var u = strToBytes(s2);
-    var n = ((u.length + 8) >> 6) + 1;
-    var b = new Array(n * 16).fill(0);
-    for (var i = 0; i < u.length; i++) b[i >> 2] |= u[i] << ((i % 4) * 8);
-    b[u.length >> 2] |= 0x80 << ((u.length % 4) * 8);
-    b[n * 16 - 2] = u.length * 8;
-    return b;
+function getUserToken() {
+  try {
+    var params = Widget.globalParams || {};
+    return (params.token || "").trim();
+  } catch (e) {
+    return "";
   }
-  var x = cv(s);
-  var a = 1732584193, b = -271733879, c = -1732584194, d = 271733878;
-  for (var i = 0; i < x.length; i += 16) {
-    var oa = a, ob = b, oc = c, od = d;
-    a=ff(a,b,c,d,x[i],7,-680876936); d=ff(d,a,b,c,x[i+1],12,-389564586); c=ff(c,d,a,b,x[i+2],17,606105819); b=ff(b,c,d,a,x[i+3],22,-1044525330);
-    a=ff(a,b,c,d,x[i+4],7,-176418897); d=ff(d,a,b,c,x[i+5],12,1200080426); c=ff(c,d,a,b,x[i+6],17,-1473231341); b=ff(b,c,d,a,x[i+7],22,-45705983);
-    a=ff(a,b,c,d,x[i+8],7,1770035416); d=ff(d,a,b,c,x[i+9],12,-1958414417); c=ff(c,d,a,b,x[i+10],17,-42063); b=ff(b,c,d,a,x[i+11],22,-1990404162);
-    a=ff(a,b,c,d,x[i+12],7,1804603682); d=ff(d,a,b,c,x[i+13],12,-40341101); c=ff(c,d,a,b,x[i+14],17,-1502002290); b=ff(b,c,d,a,x[i+15],22,1236535329);
-    a=gg(a,b,c,d,x[i+1],5,-165796510); d=gg(d,a,b,c,x[i+6],9,-1069501632); c=gg(c,d,a,b,x[i+11],14,643717713); b=gg(b,c,d,a,x[i],20,-373897302);
-    a=gg(a,b,c,d,x[i+5],5,-701558691); d=gg(d,a,b,c,x[i+10],9,38016083); c=gg(c,d,a,b,x[i+15],14,-660478335); b=gg(b,c,d,a,x[i+4],20,-405537848);
-    a=gg(a,b,c,d,x[i+9],5,568446438); d=gg(d,a,b,c,x[i+14],9,-1019803690); c=gg(c,d,a,b,x[i+3],14,-187363961); b=gg(b,c,d,a,x[i+8],20,1163531501);
-    a=gg(a,b,c,d,x[i+13],5,-1444681467); d=gg(d,a,b,c,x[i+2],9,-51403784); c=gg(c,d,a,b,x[i+7],14,1735328473); b=gg(b,c,d,a,x[i+12],20,-1926607734);
-    a=hh(a,b,c,d,x[i+5],4,-378558); d=hh(d,a,b,c,x[i+8],11,-2022574463); c=hh(c,d,a,b,x[i+11],16,1839030562); b=hh(b,c,d,a,x[i+14],23,-35309556);
-    a=hh(a,b,c,d,x[i+1],4,-1530992060); d=hh(d,a,b,c,x[i+4],11,1272893353); c=hh(c,d,a,b,x[i+7],16,-155497632); b=hh(b,c,d,a,x[i+10],23,-1094730640);
-    a=hh(a,b,c,d,x[i+13],4,681279174); d=hh(d,a,b,c,x[i],11,-358537222); c=hh(c,d,a,b,x[i+3],16,-722521979); b=hh(b,c,d,a,x[i+6],23,76029189);
-    a=hh(a,b,c,d,x[i+9],4,-640364487); d=hh(d,a,b,c,x[i+12],11,-421815835); c=hh(c,d,a,b,x[i+15],16,530742520); b=hh(b,c,d,a,x[i+2],23,-995338651);
-    a=ii(a,b,c,d,x[i],6,-198630844); d=ii(d,a,b,c,x[i+7],10,1126891415); c=ii(c,d,a,b,x[i+14],15,-1416354905); b=ii(b,c,d,a,x[i+5],21,-57434055);
-    a=ii(a,b,c,d,x[i+12],6,1700485571); d=ii(d,a,b,c,x[i+3],10,-1894986606); c=ii(c,d,a,b,x[i+10],15,-1051523); b=ii(b,c,d,a,x[i+1],21,-2054922799);
-    a=ii(a,b,c,d,x[i+8],6,1873313359); d=ii(d,a,b,c,x[i+15],10,-30611744); c=ii(c,d,a,b,x[i+6],15,-1560198380); b=ii(b,c,d,a,x[i+13],21,1309151649);
-    a=ii(a,b,c,d,x[i+4],6,-145523070); d=ii(d,a,b,c,x[i+11],10,-1120210379); c=ii(c,d,a,b,x[i+2],15,718787259); b=ii(b,c,d,a,x[i+9],21,-343485551);
-    a=ad(a,oa); b=ad(b,ob); c=ad(c,oc); d=ad(d,od);
-  }
-  return rh(a) + rh(b) + rh(c) + rh(d);
 }
 
-// ======================== Worker API ========================
+async function getDeviceId() {
+  var cached = Widget.storage.get("txh_device_id");
+  if (cached) return cached;
+
+  var resp = await apiPost("/system/info", {});
+  if (resp && resp.status === "y" && resp.data && resp.data.device_id) {
+    Widget.storage.set("txh_device_id", resp.data.device_id);
+    return resp.data.device_id;
+  }
+  return "";
+}
+
+async function getGuestToken() {
+  var cached = Widget.storage.get("txh_guest_token");
+  var cachedTime = Widget.storage.get("txh_guest_token_time");
+  var now = Date.now();
+  // Cache guest token for 30 minutes
+  if (cached && cachedTime && (now - parseInt(cachedTime)) < 30 * 60 * 1000) {
+    return cached;
+  }
+
+  var resp = await apiPost("/system/menu", {}, "", "");
+  if (resp && resp.status === "y" && resp.data && resp.data.token) {
+    var token = resp.data.token + "_" + resp.data.user_id;
+    Widget.storage.set("txh_guest_token", token);
+    Widget.storage.set("txh_guest_token_time", String(now));
+    return token;
+  }
+  return "";
+}
+
+async function getToken() {
+  // Priority 1: user-provided token
+  var userToken = getUserToken();
+  if (userToken) return userToken;
+
+  // Priority 2: auto guest token
+  var guestToken = await getGuestToken();
+  if (guestToken) return guestToken;
+
+  return "";
+}
+
+// ======================== API Layer ========================
+
+async function apiPost(path, params, tokenOverride, deviceIdOverride) {
+  try {
+    var token = tokenOverride !== undefined ? tokenOverride : await getToken();
+    var deviceId = deviceIdOverride !== undefined ? deviceIdOverride : await getDeviceId();
+
+    var envelope = {
+      data: params != null ? params : "",
+      token: token || "",
+      deviceId: deviceId || "",
+      device: "Win32",
+      source: "Apple Computer, Inc.",
+      driver: false,
+    };
+
+    var encrypted = aesEncrypt(envelope);
+    var ts = Math.floor(Date.now() / 1000);
+    var headers = {
+      "Content-Type": "text/plain",
+      "time": String(ts),
+      "deviceType": "web",
+      "version": "4.76",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    };
+
+    var resp = await Widget.http.post(API_BASE + path, encrypted, { headers: headers });
+    var text = resp.data;
+
+    // Response might be a string (base64 encrypted) or already an object
+    if (typeof text === "object" && text !== null) {
+      if (text.status === "y" || text.status === "n") return text;
+      if (text.data && typeof text.data === "string") {
+        return aesDecryptB64(text.data);
+      }
+      return text;
+    }
+
+    // String — decrypt
+    return aesDecryptB64(text.trim());
+  } catch (error) {
+    console.error("[apiPost:" + path + "] " + (error.message || error));
+    return null;
+  }
+}
+
+// ======================== VideoItem Mapping ========================
 
 function normalizeM3u8(url) {
   if (!url) return url;
@@ -236,111 +346,11 @@ function normalizeM3u8(url) {
   return BASE_URL + (url.charAt(0) === "/" ? "" : "/") + url;
 }
 
-async function fetchFromWorker(videoId) {
-  try {
-    var t = Math.floor(Date.now() / 1000);
-    var sign = md5(String(videoId) + t + SIGN_KEY);
-    var body = JSON.stringify({ id: String(videoId), t: t, sign: sign });
-    var headers = {
-      "Content-Type": "application/json",
-      "User-Agent": "TX_App_Script",
-    };
-    var resp = await Widget.http.post(WORKER_URL, body, { headers: headers });
-    var text = resp.data;
-
-    // Worker response can be: (A) pure base64 encrypted string,
-    // (B) JSON wrapper with encrypted data field, or (C) standard {status,data} format.
-    var outer;
-    try {
-      outer = JSON.parse(text);
-    } catch (e) {
-      // Not JSON — pure base64, decrypt directly
-      var raw = decryptB64(text);
-      if (raw && raw.status === "y") return raw.data;
-      return null;
-    }
-
-    // JSON — check standard status format first
-    if (outer && outer.status === "y") return outer.data;
-
-    // Check for encrypted data/body/result field
-    var keys = ["data", "body", "result"];
-    for (var i = 0; i < keys.length; i++) {
-      var k = keys[i];
-      if (outer && typeof outer[k] === "string") {
-        var inner = decryptB64(outer[k]);
-        if (inner && inner.status === "y") return inner.data;
-        if (inner) return inner;
-      }
-    }
-
-    // data is already a plain object
-    if (outer && typeof outer.data === "object") return outer.data;
-
-    return null;
-  } catch (error) {
-    // HTTP errors (500, 403, etc.), network errors, parse errors — treat as invalid ID
-    return null;
-  }
-}
-
-// ======================== Max ID management ========================
-
-async function findMaxId() {
-  // Check cache (refresh every 6 hours)
-  var cached = Widget.storage.get("txh_max_id");
-  var cachedTime = Widget.storage.get("txh_max_id_time");
-  var now = Date.now();
-  if (cached && cachedTime && (now - parseInt(cachedTime)) < 6 * 3600 * 1000) {
-    // Quick check: try cached + 1 to see if new videos exist
-    var nextId = parseInt(cached) + 1;
-    var testData = await fetchFromWorker(nextId);
-    if (testData && testData.id) {
-      // New video found — do a quick upward search (max 50 steps)
-      var newMax = nextId;
-      for (var i = nextId + 1; i <= nextId + 50; i++) {
-        var d = await fetchFromWorker(i);
-        if (d && d.id) newMax = i;
-        else break;
-      }
-      Widget.storage.set("txh_max_id", String(newMax));
-      Widget.storage.set("txh_max_id_time", String(now));
-      return newMax;
-    }
-    return parseInt(cached);
-  }
-
-  // Full binary search
-  var lo = 35000;
-  var hi = lo + 2000;
-
-  // Find an invalid hi
-  var testData = await fetchFromWorker(hi);
-  while (testData) {
-    lo = hi;
-    hi = hi + 2000;
-    testData = await fetchFromWorker(hi);
-  }
-
-  // Binary search between lo (valid) and hi (invalid)
-  while (hi - lo > 1) {
-    var mid = Math.floor((lo + hi) / 2);
-    var d = await fetchFromWorker(mid);
-    if (d) lo = mid;
-    else hi = mid;
-  }
-
-  Widget.storage.set("txh_max_id", String(lo));
-  Widget.storage.set("txh_max_id_time", String(now));
-  return lo;
-}
-
-// ======================== VideoItem mapping ========================
-
 function mapVideoItem(raw) {
-  if (!raw || !raw.id) return null;
+  if (!raw || (!raw.id && !raw.movie_id)) return null;
+  var id = raw.id || raw.movie_id;
   return {
-    id: String(raw.id),
+    id: String(id),
     type: "url",
     title: raw.name || raw.title || "",
     posterPath: raw.img || raw.pic || raw.cover || "",
@@ -349,7 +359,7 @@ function mapVideoItem(raw) {
     durationText: raw.duration || "",
     duration: raw.duration_time ? parseInt(raw.duration_time, 10) : undefined,
     releaseDate: raw.time ? raw.time.split(" ")[0] : undefined,
-    link: String(raw.id),
+    link: String(id),
   };
 }
 
@@ -360,14 +370,12 @@ function mapDetail(raw) {
 
   item.description = raw.description || raw.content || "";
 
-  // Tags → genreItems
   if (raw.tags && raw.tags.length) {
     item.genreItems = raw.tags.map(function (t) {
       return { id: String(t.id || ""), title: (t.name || "").trim() };
     });
   }
 
-  // Peoples
   if (raw.nickname) {
     item.peoples = [{
       id: String(raw.user_id || raw.nickname || ""),
@@ -377,7 +385,7 @@ function mapDetail(raw) {
     }];
   }
 
-  // Video URL — check multiple possible fields
+  // Play URL
   var playLink = raw.play_link || raw.play_url ||
     (raw.lines && raw.lines.length ? raw.lines[0].link : "") ||
     (raw.line_list && raw.line_list.length ? raw.line_list[0].link : "");
@@ -385,13 +393,12 @@ function mapDetail(raw) {
     item.videoUrl = normalizeM3u8(playLink);
   }
 
-  // Backup link
   var backupLink = raw.backup_link || raw.backup_url || "";
   if (backupLink) {
     item.previewUrl = normalizeM3u8(backupLink);
   }
 
-  // If no videoUrl found, scan for any m3u8 URL in the raw data
+  // Fallback: scan for m3u8
   if (!item.videoUrl) {
     function scanM3u8(obj) {
       if (!obj || typeof obj !== "object") return null;
@@ -422,35 +429,51 @@ function mapDetail(raw) {
 
 // ======================== Handlers ========================
 
+function extractVideoList(data) {
+  if (!data) return [];
+  // The API might return the list under various keys
+  var keys = ["list", "data", "movies", "items", "recommend"];
+  for (var i = 0; i < keys.length; i++) {
+    if (Array.isArray(data[keys[i]])) {
+      return data[keys[i]];
+    }
+  }
+  // If data itself is an array
+  if (Array.isArray(data)) return data;
+  // API returns array-like object with numeric keys {0: {...}, 1: {...}, ...}
+  if (typeof data === "object") {
+    var arr = [];
+    var idx = 0;
+    while (data[idx] !== undefined) {
+      arr.push(data[idx]);
+      idx++;
+    }
+    if (arr.length > 0) return arr;
+  }
+  return [];
+}
+
 async function loadList(params) {
   params = params || {};
   var page = Number(params.page || 1);
 
   try {
-    var maxId = await findMaxId();
-    var startId = maxId - (page - 1) * PAGE_SIZE;
-
-    if (startId < 1) return [];
-
-    // Fetch PAGE_SIZE videos in parallel
-    var promises = [];
-    for (var i = 0; i < PAGE_SIZE; i++) {
-      var id = startId - i;
-      if (id < 1) break;
-      promises.push(
-        fetchFromWorker(id).catch(function () { return null; })
-      );
+    var resp = await apiPost("/movie/search", { page: page, type: "time" });
+    if (!resp || resp.status !== "y") {
+      // Try /movie/filter as fallback (public endpoint, limited results)
+      resp = await apiPost("/movie/filter", { page: page });
     }
 
-    var results = await Promise.all(promises);
+    if (!resp || resp.status !== "y") {
+      throw new Error(resp && resp.error ? resp.error : "获取列表失败");
+    }
 
-    // Map to VideoItems, filter out nulls
+    var rawList = extractVideoList(resp.data);
     var items = [];
-    for (var j = 0; j < results.length; j++) {
-      var item = mapVideoItem(results[j]);
+    for (var i = 0; i < rawList.length; i++) {
+      var item = mapVideoItem(rawList[i]);
       if (item) items.push(item);
     }
-
     return items;
   } catch (error) {
     console.error("[loadList] " + (error.message || error));
@@ -467,51 +490,18 @@ async function search(params) {
     throw new Error("请输入搜索关键词");
   }
 
-  // Worker mode: scan a batch of videos and filter by keyword locally
-  // This is limited but provides basic search functionality
   try {
-    var maxId = await findMaxId();
-    // Scan 60 videos per search page (fetch in parallel, filter by keyword)
-    var scanCount = 60;
-    var startId = maxId - (page - 1) * scanCount;
-    if (startId < 1) return [];
-
-    var promises = [];
-    for (var i = 0; i < scanCount; i++) {
-      var id = startId - i;
-      if (id < 1) break;
-      promises.push(
-        fetchFromWorker(id).catch(function () { return null; })
-      );
+    var resp = await apiPost("/movie/search", { page: page, keyword: keyword });
+    if (!resp || resp.status !== "y") {
+      throw new Error(resp && resp.error ? resp.error : "搜索失败");
     }
 
-    var results = await Promise.all(promises);
-
+    var rawList = extractVideoList(resp.data);
     var items = [];
-    var kw = keyword.toLowerCase();
-    for (var j = 0; j < results.length; j++) {
-      var raw = results[j];
-      if (!raw || !raw.id) continue;
-      var title = (raw.name || raw.title || "").toLowerCase();
-      var desc = (raw.description || "").toLowerCase();
-      var nick = (raw.nickname || "").toLowerCase();
-      // Check tags
-      var tagMatch = false;
-      if (raw.tags && raw.tags.length) {
-        for (var t = 0; t < raw.tags.length; t++) {
-          if ((raw.tags[t].name || "").toLowerCase().indexOf(kw) !== -1) {
-            tagMatch = true;
-            break;
-          }
-        }
-      }
-      if (title.indexOf(kw) !== -1 || desc.indexOf(kw) !== -1 ||
-          nick.indexOf(kw) !== -1 || tagMatch) {
-        var item = mapVideoItem(raw);
-        if (item) items.push(item);
-      }
+    for (var i = 0; i < rawList.length; i++) {
+      var item = mapVideoItem(rawList[i]);
+      if (item) items.push(item);
     }
-
     return items;
   } catch (error) {
     console.error("[search] " + (error.message || error));
@@ -520,14 +510,19 @@ async function search(params) {
 }
 
 async function loadDetail(link) {
-  var videoId = String(link);
-  if (videoId.indexOf(":") !== -1) videoId = videoId.split(":").pop();
-  if (videoId.indexOf("/") !== -1) videoId = videoId.split("/").pop();
+  var videoId = String(link).replace(/[^0-9]/g, "");
 
   try {
-    var data = await fetchFromWorker(videoId);
-    if (!data) throw new Error("视频不存在或已删除");
-    return mapDetail(data);
+    var resp = await apiPost("/movie/detail", { id: parseInt(videoId, 10) });
+    if (!resp || resp.status !== "y") {
+      throw new Error(resp && resp.error ? resp.error : "获取详情失败");
+    }
+
+    var item = mapDetail(resp.data);
+    if (!item) {
+      throw new Error("无法解析视频数据");
+    }
+    return item;
   } catch (error) {
     console.error("[loadDetail] " + (error.message || error));
     throw error;
