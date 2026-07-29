@@ -1,9 +1,9 @@
 WidgetMetadata = {
   id: "forward.txh",
   title: "糖心",
-  version: "3.0.1",
+  version: "3.1.0",
   requiredVersion: "0.0.1",
-  description: "糖心视频 — 直连官方 API。自动获取游客 Token，如失败请在下方手动填写。Token 获取方式：浏览器登录 txh068.com → F12 → Application → Local Storage → 复制 fuck 的值。",
+  description: "糖心视频 — 直连官方 API。自动尝试获取游客 Token（不保证成功）。如加载失败，请在下方手动填写 Token。获取方式：浏览器登录 txh068.com → F12 → Application → Local Storage → 复制 fuck 的值。",
   author: "Forward",
   site: "https://txh068.com",
   detailCacheDuration: 60,
@@ -176,7 +176,7 @@ function aesEncryptBlock(block, w) {
   for (var rd = 1; rd <= 9; rd++) {
     for (var i = 0; i < 16; i++) s[i] = SBOX[s[i]];
     var t = s.slice();
-    for (var r = 0; r < 4; r++) for (var c = 0; c < 4; c++) s[r + 4*c] = t[(r+c) % 4 + 4*c];
+    for (var r = 0; r < 4; r++) for (var c = 0; c < 4; c++) s[r + 4*c] = t[r + 4*((c+r) % 4)];
     for (var c = 0; c < 4; c++) {
       var a = [s[4*c], s[4*c+1], s[4*c+2], s[4*c+3]];
       s[4*c]   = gmul(a[0],2) ^ gmul(a[1],3) ^ a[2] ^ a[3];
@@ -188,7 +188,7 @@ function aesEncryptBlock(block, w) {
   }
   for (var i = 0; i < 16; i++) s[i] = SBOX[s[i]];
   var t = s.slice();
-  for (var r = 0; r < 4; r++) for (var c = 0; c < 4; c++) s[r + 4*c] = t[(r+c) % 4 + 4*c];
+  for (var r = 0; r < 4; r++) for (var c = 0; c < 4; c++) s[r + 4*c] = t[r + 4*((c+r) % 4)];
   for (var r = 0; r < 4; r++) for (var c = 0; c < 4; c++) s[r + 4*c] ^= w[40 + c][r];
   return s;
 }
@@ -249,20 +249,24 @@ function getUserToken() {
   }
 }
 
-async function getDeviceId() {
+// Generate deviceId locally — format: web_<13 hex chars>
+// No need to call /system/info (saves a network round-trip and avoids parsing issues)
+function getDeviceId() {
   var cached = Widget.storage.get("txh_device_id");
   if (cached) return cached;
 
-  // CRITICAL: pass explicit "" overrides to prevent recursion.
-  // Without overrides, apiPost calls getToken() -> getGuestToken() -> apiPost("/system/menu")
-  // -> back to apiPost("/system/info") -> getDeviceId() -> infinite loop
-  var resp = await apiPost("/system/info", {}, "", "");
-  if (resp && resp.status === "y" && resp.data && resp.data.device_id) {
-    Widget.storage.set("txh_device_id", resp.data.device_id);
-    return resp.data.device_id;
+  var hex = "";
+  var chars = "0123456789abcdef";
+  for (var i = 0; i < 13; i++) {
+    hex += chars[Math.floor(Math.random() * 16)];
   }
-  return "";
+  var deviceId = "web_" + hex;
+  Widget.storage.set("txh_device_id", deviceId);
+  return deviceId;
 }
+
+// In-flight promise sharing: prevents parallel calls from making redundant API requests
+var _guestTokenPromise = null;
 
 async function getGuestToken() {
   var cached = Widget.storage.get("txh_guest_token");
@@ -274,36 +278,59 @@ async function getGuestToken() {
   }
 
   // Negative cache: if last attempt failed, wait 5 min before retrying
-  // This prevents retry storms when /system/menu returns empty tokens
   var failTime = Widget.storage.get("txh_guest_fail_time");
   if (failTime && (now - parseInt(failTime)) < 5 * 60 * 1000) {
     return "";
   }
 
-  // Get deviceId first, then use it for the menu request
-  var deviceId = await getDeviceId();
-  var resp = await apiPost("/system/menu", {}, "", deviceId);
-  if (resp && resp.status === "y" && resp.data && resp.data.token) {
-    var token = resp.data.token + "_" + resp.data.user_id;
-    Widget.storage.set("txh_guest_token", token);
-    Widget.storage.set("txh_guest_token_time", String(now));
-    Widget.storage.set("txh_guest_fail_time", ""); // clear fail cache on success
-    return token;
-  }
-  // Record failure time to prevent immediate retries
-  Widget.storage.set("txh_guest_fail_time", String(now));
-  return "";
+  // In-flight dedup: if another call is already fetching, wait for it
+  if (_guestTokenPromise) return _guestTokenPromise;
+
+  _guestTokenPromise = (async function () {
+    try {
+      var deviceId = getDeviceId();
+      // /system/menu expects {channel_code, share_code} per Nuxt.js source
+      // On web this endpoint is normally skipped, but it can still return a guest token
+      var resp = await apiPost("/system/menu", { channel_code: "", share_code: "" }, "", deviceId);
+      console.log("[getGuestToken] resp: " + JSON.stringify(resp));
+      if (resp && resp.status === "y" && resp.data && resp.data.token) {
+        var token = resp.data.token + "_" + resp.data.user_id;
+        Widget.storage.set("txh_guest_token", token);
+        Widget.storage.set("txh_guest_token_time", String(Date.now()));
+        Widget.storage.set("txh_guest_fail_time", "");
+        return token;
+      }
+      // Failed — record to prevent retry storms
+      Widget.storage.set("txh_guest_fail_time", String(Date.now()));
+      return "";
+    } catch (e) {
+      console.error("[getGuestToken] error: " + (e.message || e));
+      Widget.storage.set("txh_guest_fail_time", String(Date.now()));
+      return "";
+    } finally {
+      _guestTokenPromise = null;
+    }
+  })();
+
+  return _guestTokenPromise;
 }
 
 async function getToken() {
   // Priority 1: user-provided token
   var userToken = getUserToken();
-  if (userToken) return userToken;
+  if (userToken) {
+    console.log("[getToken] using user token");
+    return userToken;
+  }
 
   // Priority 2: auto guest token
   var guestToken = await getGuestToken();
-  if (guestToken) return guestToken;
+  if (guestToken) {
+    console.log("[getToken] using guest token");
+    return guestToken;
+  }
 
+  console.log("[getToken] no token available");
   return "";
 }
 
@@ -312,7 +339,7 @@ async function getToken() {
 async function apiPost(path, params, tokenOverride, deviceIdOverride) {
   try {
     var token = tokenOverride !== undefined ? tokenOverride : await getToken();
-    var deviceId = deviceIdOverride !== undefined ? deviceIdOverride : await getDeviceId();
+    var deviceId = deviceIdOverride !== undefined ? deviceIdOverride : getDeviceId();
 
     var envelope = {
       data: params != null ? params : "",
@@ -330,23 +357,46 @@ async function apiPost(path, params, tokenOverride, deviceIdOverride) {
       "time": String(ts),
       "deviceType": "web",
       "version": "4.76",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     };
 
     var resp = await Widget.http.post(API_BASE + path, encrypted, { headers: headers });
-    var text = resp.data;
+
+    // Debug: log raw response to help diagnose issues
+    var text = resp ? resp.data : null;
+    if (typeof text === "undefined" || text === null) {
+      // Maybe resp itself is the data (some runtimes return body directly)
+      if (resp && typeof resp === "string") {
+        text = resp;
+      } else {
+        console.error("[apiPost:" + path + "] empty response, resp type: " + typeof resp);
+        return null;
+      }
+    }
 
     // Response might be a string (base64 encrypted) or already an object
     if (typeof text === "object" && text !== null) {
+      // Already parsed as object — check if it has status
       if (text.status === "y" || text.status === "n") return text;
+      // Maybe the actual data is nested
       if (text.data && typeof text.data === "string") {
         return aesDecryptB64(text.data);
       }
       return text;
     }
 
-    // String — decrypt
-    return aesDecryptB64(text.trim());
+    // String — should be base64 encrypted, decrypt it
+    if (typeof text === "string") {
+      text = text.trim();
+      if (text.length === 0) {
+        console.error("[apiPost:" + path + "] empty response string");
+        return null;
+      }
+      return aesDecryptB64(text);
+    }
+
+    console.error("[apiPost:" + path + "] unexpected response type: " + typeof text);
+    return null;
   } catch (error) {
     console.error("[apiPost:" + path + "] " + (error.message || error));
     return null;
@@ -475,12 +525,17 @@ async function loadList(params) {
   try {
     var resp = await apiPost("/movie/search", { page: page, type: "time" });
     if (!resp || resp.status !== "y") {
-      // Try /movie/filter as fallback (public endpoint, limited results)
+      // Try /movie/filter as fallback (may work without token)
       resp = await apiPost("/movie/filter", { page: page });
     }
 
     if (!resp || resp.status !== "y") {
-      throw new Error(resp && resp.error ? resp.error : "获取列表失败");
+      var errMsg = resp && resp.error ? resp.error : "获取列表失败";
+      // If security error, likely token is missing or invalid
+      if (errMsg.indexOf("安全") !== -1 || errMsg.indexOf("token") !== -1) {
+        throw new Error("Token 无效或已过期。请在模块设置中手动填写 Token。\n获取方式：浏览器登录 txh068.com → F12 → Application → Local Storage → 复制 fuck 的值");
+      }
+      throw new Error(errMsg);
     }
 
     var rawList = extractVideoList(resp.data);
@@ -496,7 +551,7 @@ async function loadList(params) {
   }
 }
 
-async function search(params) {
+  async function search(params) {
   params = params || {};
   var keyword = (params.keyword || "").trim();
   var page = Number(params.page || 1);
@@ -508,7 +563,11 @@ async function search(params) {
   try {
     var resp = await apiPost("/movie/search", { page: page, keyword: keyword });
     if (!resp || resp.status !== "y") {
-      throw new Error(resp && resp.error ? resp.error : "搜索失败");
+      var errMsg = resp && resp.error ? resp.error : "搜索失败";
+      if (errMsg.indexOf("安全") !== -1 || errMsg.indexOf("token") !== -1) {
+        throw new Error("Token 无效或已过期。请在模块设置中手动填写 Token。");
+      }
+      throw new Error(errMsg);
     }
 
     var rawList = extractVideoList(resp.data);
