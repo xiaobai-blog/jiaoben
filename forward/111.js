@@ -1,7 +1,7 @@
 WidgetMetadata = {
   id: "forward.txh",
   title: "糖心",
-  version: "3.0.0",
+  version: "3.0.1",
   requiredVersion: "0.0.1",
   description: "糖心视频 — 直连官方 API。自动获取游客 Token，如失败请在下方手动填写。Token 获取方式：浏览器登录 txh068.com → F12 → Application → Local Storage → 复制 fuck 的值。",
   author: "Forward",
@@ -253,7 +253,10 @@ async function getDeviceId() {
   var cached = Widget.storage.get("txh_device_id");
   if (cached) return cached;
 
-  var resp = await apiPost("/system/info", {});
+  // CRITICAL: pass explicit "" overrides to prevent recursion.
+  // Without overrides, apiPost calls getToken() -> getGuestToken() -> apiPost("/system/menu")
+  // -> back to apiPost("/system/info") -> getDeviceId() -> infinite loop
+  var resp = await apiPost("/system/info", {}, "", "");
   if (resp && resp.status === "y" && resp.data && resp.data.device_id) {
     Widget.storage.set("txh_device_id", resp.data.device_id);
     return resp.data.device_id;
@@ -270,13 +273,25 @@ async function getGuestToken() {
     return cached;
   }
 
-  var resp = await apiPost("/system/menu", {}, "", "");
+  // Negative cache: if last attempt failed, wait 5 min before retrying
+  // This prevents retry storms when /system/menu returns empty tokens
+  var failTime = Widget.storage.get("txh_guest_fail_time");
+  if (failTime && (now - parseInt(failTime)) < 5 * 60 * 1000) {
+    return "";
+  }
+
+  // Get deviceId first, then use it for the menu request
+  var deviceId = await getDeviceId();
+  var resp = await apiPost("/system/menu", {}, "", deviceId);
   if (resp && resp.status === "y" && resp.data && resp.data.token) {
     var token = resp.data.token + "_" + resp.data.user_id;
     Widget.storage.set("txh_guest_token", token);
     Widget.storage.set("txh_guest_token_time", String(now));
+    Widget.storage.set("txh_guest_fail_time", ""); // clear fail cache on success
     return token;
   }
+  // Record failure time to prevent immediate retries
+  Widget.storage.set("txh_guest_fail_time", String(now));
   return "";
 }
 
