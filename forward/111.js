@@ -1,7 +1,7 @@
 WidgetMetadata = {
   id: "forward.txh",
   title: "糖心",
-  version: "3.5.0",
+  version: "3.5.1",
   requiredVersion: "0.0.1",
   description: "糖心视频 — 直连官方 API，自动获取游客 Token。播放通过 midorii.cc 代理获取完整视频（跳过 VIP/预览限制）。封面图通过 .bnc 解密代理显示（AES-128-ECB）。如加载失败请在下方手动填写 Token。",
   author: "Forward",
@@ -812,24 +812,27 @@ async function loadDetail(link) {
     // Use .bnc decrypted image (already set in mapDetail)
     item.headers = { Referer: CDN_REFERER };
 
+    // Save the original txh068.com play URL as fallback (playable preview)
+    var originalUrl = item.videoUrl || "";
+
     // Try midorii.cc for full video (no preview restriction)
     var fullUrl = await getFullVideoUrl(videoId);
     if (fullUrl) {
       // midorii.cc m3u8 has PNG-disguised + AES-encrypted TS segments
       // Player needs hls_proxy.js running at localhost:8888 to decode
-      // Try proxy first, fall back to direct URL
-      var proxyUrl = "http://localhost:8888/m3u8/" + videoId;
-      item.videoUrl = proxyUrl;
-      item.previewUrl = fullUrl; // direct midorii URL as fallback
-      console.log("[loadDetail] using midorii.cc full video via proxy: " + proxyUrl);
+      item.videoUrl = "http://localhost:8888/m3u8/" + videoId;
+      // Keep original txh068.com URL as fallback (playable without proxy)
+      if (originalUrl) item.previewUrl = originalUrl;
+      console.log("[loadDetail] using midorii.cc full video via proxy, fallback: " + (originalUrl || "none"));
     } else {
       // Fallback: try CDN (t.5gcdn.xyz) — works for ~500 videos in sitemap
       var cdnAvailable = await checkCdnVideo(videoId);
       if (cdnAvailable) {
         item.videoUrl = getCdnUrl(videoId);
+        if (originalUrl) item.previewUrl = originalUrl;
         console.log("[loadDetail] using CDN full video: " + item.videoUrl);
       } else {
-        // Last resort: txh068.com preview m3u8 (15-32s preview for guest tokens)
+        // Last resort: keep txh068.com preview m3u8 (already set by mapDetail)
         console.log("[loadDetail] no full video source, using txh068.com preview: " + (item.videoUrl || "none"));
       }
     }
