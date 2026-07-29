@@ -1,9 +1,9 @@
 WidgetMetadata = {
   id: "forward.txh",
   title: "糖心",
-  version: "3.3.0",
+  version: "3.4.0",
   requiredVersion: "0.0.1",
-  description: "糖心视频 — 直连官方 API，自动获取游客 Token，播放优先使用 CDN 完整视频源（跳过 VIP/预览限制），CDN 不可用时回退到官方线路。如加载失败请在下方手动填写 Token。",
+  description: "糖心视频 — 直连官方 API，自动获取游客 Token。播放通过 midorii.cc 代理获取完整视频（跳过 VIP/预览限制）。封面图来自 CDN 镜像。如加载失败请在下方手动填写 Token。",
   author: "Forward",
   site: "https://txh068.com",
   detailCacheDuration: 60,
@@ -25,6 +25,96 @@ WidgetMetadata = {
         { name: "page", title: "页码", type: "page" },
       ],
     },
+    {
+      id: "hot",
+      title: "最热",
+      functionName: "loadList",
+      cacheDuration: 300,
+      params: [
+        { name: "page", title: "页码", type: "page" },
+        { name: "type", title: "排序", type: "input", defaultValue: "hot", hidden: true },
+      ],
+    },
+    {
+      id: "views",
+      title: "播放最多",
+      functionName: "loadList",
+      cacheDuration: 300,
+      params: [
+        { name: "page", title: "页码", type: "page" },
+        { name: "type", title: "排序", type: "input", defaultValue: "views", hidden: true },
+      ],
+    },
+    {
+      id: "score",
+      title: "评分最高",
+      functionName: "loadList",
+      cacheDuration: 300,
+      params: [
+        { name: "page", title: "页码", type: "page" },
+        { name: "type", title: "排序", type: "input", defaultValue: "score", hidden: true },
+      ],
+    },
+    {
+      id: "collect",
+      title: "收藏最多",
+      functionName: "loadList",
+      cacheDuration: 300,
+      params: [
+        { name: "page", title: "页码", type: "page" },
+        { name: "type", title: "排序", type: "input", defaultValue: "collect", hidden: true },
+      ],
+    },
+    {
+      id: "daily",
+      title: "每日精选",
+      functionName: "loadList",
+      cacheDuration: 300,
+      params: [
+        { name: "page", title: "页码", type: "page" },
+        { name: "type", title: "排序", type: "input", defaultValue: "daily", hidden: true },
+      ],
+    },
+    {
+      id: "recommend",
+      title: "推荐",
+      functionName: "loadList",
+      cacheDuration: 300,
+      params: [
+        { name: "page", title: "页码", type: "page" },
+        { name: "type", title: "排序", type: "input", defaultValue: "recommend", hidden: true },
+      ],
+    },
+    {
+      id: "rankMovie",
+      title: "视频榜",
+      functionName: "loadRank",
+      cacheDuration: 300,
+      params: [
+        { name: "page", title: "页码", type: "page" },
+        { name: "rankType", title: "排行类型", type: "input", defaultValue: "movie", hidden: true },
+      ],
+    },
+    {
+      id: "rankOriginal",
+      title: "原创榜",
+      functionName: "loadRank",
+      cacheDuration: 300,
+      params: [
+        { name: "page", title: "页码", type: "page" },
+        { name: "rankType", title: "排行类型", type: "input", defaultValue: "original", hidden: true },
+      ],
+    },
+    {
+      id: "rankBuy",
+      title: "解锁榜",
+      functionName: "loadRank",
+      cacheDuration: 300,
+      params: [
+        { name: "page", title: "页码", type: "page" },
+        { name: "rankType", title: "排行类型", type: "input", defaultValue: "movieBuy", hidden: true },
+      ],
+    },
   ],
   search: {
     title: "搜索",
@@ -41,10 +131,14 @@ var AES_KEY = "fd14f9f8e38808fa";
 var API_BASE = "https://tth.txh069.com/h5";
 var BASE_URL = "https://tth.txh069.com";
 
-// CDN: tangxinvlog.app mirror — serves full videos without VIP/preview restriction
-// All CDN resources (m3u8, key, TS segments) require Referer header
+// CDN: tangxinvlog.app mirror — serves full videos + standard JPEG covers
+// All CDN resources (m3u8, key, TS segments, cover.jpg) require Referer header
 var CDN_BASE = "https://t.5gcdn.xyz/videos";
 var CDN_REFERER = "https://tangxinvlog.app/";
+
+// midorii.cc: shared VIP proxy — returns full video m3u8 without preview restriction
+// TS segments are PNG-disguised + AES-128 encrypted, needs hls_proxy.js to decode
+var MIDORI_API = "https://midorii.cc/api/parse?id=";
 
 // ======================== AES-128-ECB ========================
 var SBOX = [
@@ -419,17 +513,28 @@ function normalizeM3u8(url) {
 function mapVideoItem(raw) {
   if (!raw || (!raw.id && !raw.movie_id)) return null;
   var id = raw.id || raw.movie_id;
+  var videoId = String(id);
+
+  // Cover image: txh068.com's .bnc images are encrypted (not standard JPEG/PNG)
+  // Use hls_proxy.js /img/{videoId} endpoint which fetches t.5gcdn.xyz cover.jpg with Referer
+  // Falls back to direct CDN URL (requires Referer header in item.headers)
+  var proxyCover = "http://localhost:8888/img/" + videoId;
+  var cdnCover = CDN_BASE + "/" + videoId + "/cover.jpg";
+
   return {
-    id: String(id),
+    id: videoId,
     type: "url",
     title: raw.name || raw.title || "",
-    posterPath: raw.img || raw.pic || raw.cover || "",
-    backdropPath: raw.img || raw.pic || raw.cover || "",
+    posterPath: proxyCover,
+    backdropPath: proxyCover,
+    coverUrl: proxyCover,
+    imageUrl: cdnCover,
     rating: raw.score ? parseFloat(raw.score) : undefined,
     durationText: raw.duration || "",
     duration: raw.duration_time ? parseInt(raw.duration_time, 10) : undefined,
     releaseDate: raw.time ? raw.time.split(" ")[0] : undefined,
-    link: String(id),
+    link: videoId,
+    headers: { Referer: CDN_REFERER },
   };
 }
 
@@ -561,9 +666,10 @@ function extractVideoList(data) {
 async function loadList(params) {
   params = params || {};
   var page = Number(params.page || 1);
+  var type = params.type || "time";
 
   try {
-    var resp = await apiPost("/movie/search", { page: page, type: "time" });
+    var resp = await apiPost("/movie/search", { page: page, type: type });
     if (!resp || resp.status !== "y") {
       // Try /movie/filter as fallback (may work without token)
       resp = await apiPost("/movie/filter", { page: page });
@@ -572,7 +678,7 @@ async function loadList(params) {
     if (!resp || resp.status !== "y") {
       var errMsg = resp && resp.error ? resp.error : "获取列表失败";
       // If security error, likely token is missing or invalid
-      if (errMsg.indexOf("安全") !== -1 || errMsg.indexOf("token") !== -1) {
+      if (errMsg.indexOf("安全") !== -1 || errMsg.indexOf("token") !== -1 || errMsg.indexOf("授权") !== -1) {
         throw new Error("Token 无效或已过期。请在模块设置中手动填写 Token。\n获取方式：浏览器登录 txh068.com → F12 → Application → Local Storage → 复制 fuck 的值");
       }
       throw new Error(errMsg);
@@ -591,6 +697,35 @@ async function loadList(params) {
   }
 }
 
+// Ranking: /ranking/movie, /ranking/original, /ranking/movieBuy
+async function loadRank(params) {
+  params = params || {};
+  var page = Number(params.page || 1);
+  var rankType = params.rankType || "movie";
+
+  try {
+    var resp = await apiPost("/ranking/" + rankType, { page: page });
+    if (!resp || resp.status !== "y") {
+      var errMsg = resp && resp.error ? resp.error : "获取排行失败";
+      if (errMsg.indexOf("安全") !== -1 || errMsg.indexOf("token") !== -1 || errMsg.indexOf("授权") !== -1) {
+        throw new Error("Token 无效或已过期。请在模块设置中手动填写 Token。");
+      }
+      throw new Error(errMsg);
+    }
+
+    var rawList = extractVideoList(resp.data);
+    var items = [];
+    for (var i = 0; i < rawList.length; i++) {
+      var item = mapVideoItem(rawList[i]);
+      if (item) items.push(item);
+    }
+    return items;
+  } catch (error) {
+    console.error("[loadRank] " + (error.message || error));
+    throw error;
+  }
+}
+
   async function search(params) {
   params = params || {};
   var keyword = (params.keyword || "").trim();
@@ -604,7 +739,7 @@ async function loadList(params) {
     var resp = await apiPost("/movie/search", { page: page, keyword: keyword });
     if (!resp || resp.status !== "y") {
       var errMsg = resp && resp.error ? resp.error : "搜索失败";
-      if (errMsg.indexOf("安全") !== -1 || errMsg.indexOf("token") !== -1) {
+      if (errMsg.indexOf("安全") !== -1 || errMsg.indexOf("token") !== -1 || errMsg.indexOf("授权") !== -1) {
         throw new Error("Token 无效或已过期。请在模块设置中手动填写 Token。");
       }
       throw new Error(errMsg);
@@ -668,6 +803,36 @@ function getCdnUrl(videoId) {
   return CDN_BASE + "/" + videoId + "/index.m3u8";
 }
 
+// ======================== Full Video (midorii.cc) ========================
+
+// Fetch full video m3u8 URL from midorii.cc shared VIP proxy
+// Returns empty string if failed
+async function getFullVideoUrl(videoId) {
+  try {
+    var resp = await Widget.http.get(MIDORI_API + videoId + "&source=tx", {
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    var text = "";
+    if (typeof resp === "string") {
+      text = resp;
+    } else if (resp && typeof resp.data === "string") {
+      text = resp.data;
+    } else if (resp && typeof resp.data === "object") {
+      text = JSON.stringify(resp.data);
+    }
+    var match = text.match(/"play_url"\s*:\s*"([^"]+)"/);
+    if (match && match[1]) {
+      console.log("[getFullVideoUrl] midorii.cc success: " + match[1]);
+      return match[1];
+    }
+    console.log("[getFullVideoUrl] midorii.cc no play_url in response");
+    return "";
+  } catch (e) {
+    console.log("[getFullVideoUrl] midorii.cc error: " + (e.message || e));
+    return "";
+  }
+}
+
 async function loadDetail(link) {
   var videoId = String(link).replace(/[^0-9]/g, "");
 
@@ -682,22 +847,33 @@ async function loadDetail(link) {
       throw new Error("无法解析视频数据");
     }
 
-    // Save the txh068.com URL as fallback (may be preview-only for guest tokens)
-    var fallbackUrl = item.videoUrl || "";
+    // Use proxy cover as posterPath (standard JPEG via hls_proxy.js)
+    var proxyCover = "http://localhost:8888/img/" + videoId;
+    item.posterPath = proxyCover;
+    item.backdropPath = proxyCover;
+    item.coverUrl = proxyCover;
+    item.headers = { Referer: CDN_REFERER };
 
-    // Try CDN mirror first — serves full video without VIP/preview restriction
-    var cdnAvailable = await checkCdnVideo(videoId);
-    if (cdnAvailable) {
-      item.videoUrl = getCdnUrl(videoId);
-      // Player needs Referer header for all CDN requests (m3u8, key, TS segments)
-      item.headers = { Referer: CDN_REFERER };
-      console.log("[loadDetail] using CDN full video: " + item.videoUrl);
-      // Keep txh068.com URL as backup
-      if (fallbackUrl) {
-        item.previewUrl = fallbackUrl;
-      }
+    // Try midorii.cc for full video (no preview restriction)
+    var fullUrl = await getFullVideoUrl(videoId);
+    if (fullUrl) {
+      // midorii.cc m3u8 has PNG-disguised + AES-encrypted TS segments
+      // Player needs hls_proxy.js running at localhost:8888 to decode
+      // Try proxy first, fall back to direct URL
+      var proxyUrl = "http://localhost:8888/m3u8/" + videoId;
+      item.videoUrl = proxyUrl;
+      item.previewUrl = fullUrl; // direct midorii URL as fallback
+      console.log("[loadDetail] using midorii.cc full video via proxy: " + proxyUrl);
     } else {
-      console.log("[loadDetail] CDN unavailable, using txh068.com URL (may be preview): " + fallbackUrl);
+      // Fallback: try CDN (t.5gcdn.xyz) — works for ~500 videos in sitemap
+      var cdnAvailable = await checkCdnVideo(videoId);
+      if (cdnAvailable) {
+        item.videoUrl = getCdnUrl(videoId);
+        console.log("[loadDetail] using CDN full video: " + item.videoUrl);
+      } else {
+        // Last resort: txh068.com preview m3u8 (15-32s preview for guest tokens)
+        console.log("[loadDetail] no full video source, using txh068.com preview: " + (item.videoUrl || "none"));
+      }
     }
 
     return item;
