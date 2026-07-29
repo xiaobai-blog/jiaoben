@@ -1,9 +1,9 @@
 WidgetMetadata = {
   id: "forward.txh",
   title: "糖心",
-  version: "2.0.0",
+  version: "2.0.1",
   requiredVersion: "0.0.1",
-  description: "糖心视频 — 纯 Worker 代理模式，无需 Token。列表通过视频 ID 倒序扫描实现，播放直接获取完整 m3u8。",
+  description: "糖心视频 — 纯 Worker 代扫描实现，播放直接获取完整 m3u8。",
   author: "Forward",
   site: "https://txh068.com",
   detailCacheDuration: 60,
@@ -237,46 +237,51 @@ function normalizeM3u8(url) {
 }
 
 async function fetchFromWorker(videoId) {
-  var t = Math.floor(Date.now() / 1000);
-  var sign = md5(String(videoId) + t + SIGN_KEY);
-  var body = JSON.stringify({ id: String(videoId), t: t, sign: sign });
-  var headers = {
-    "Content-Type": "application/json",
-    "User-Agent": "TX_App_Script",
-  };
-  var resp = await Widget.http.post(WORKER_URL, body, { headers: headers });
-  var text = resp.data;
-
-  // Worker response can be: (A) pure base64 encrypted string,
-  // (B) JSON wrapper with encrypted data field, or (C) standard {status,data} format.
-  var outer;
   try {
-    outer = JSON.parse(text);
-  } catch (e) {
-    // Not JSON — pure base64, decrypt directly
-    var raw = decryptB64(text);
-    if (raw && raw.status === "y") return raw.data;
+    var t = Math.floor(Date.now() / 1000);
+    var sign = md5(String(videoId) + t + SIGN_KEY);
+    var body = JSON.stringify({ id: String(videoId), t: t, sign: sign });
+    var headers = {
+      "Content-Type": "application/json",
+      "User-Agent": "TX_App_Script",
+    };
+    var resp = await Widget.http.post(WORKER_URL, body, { headers: headers });
+    var text = resp.data;
+
+    // Worker response can be: (A) pure base64 encrypted string,
+    // (B) JSON wrapper with encrypted data field, or (C) standard {status,data} format.
+    var outer;
+    try {
+      outer = JSON.parse(text);
+    } catch (e) {
+      // Not JSON — pure base64, decrypt directly
+      var raw = decryptB64(text);
+      if (raw && raw.status === "y") return raw.data;
+      return null;
+    }
+
+    // JSON — check standard status format first
+    if (outer && outer.status === "y") return outer.data;
+
+    // Check for encrypted data/body/result field
+    var keys = ["data", "body", "result"];
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (outer && typeof outer[k] === "string") {
+        var inner = decryptB64(outer[k]);
+        if (inner && inner.status === "y") return inner.data;
+        if (inner) return inner;
+      }
+    }
+
+    // data is already a plain object
+    if (outer && typeof outer.data === "object") return outer.data;
+
+    return null;
+  } catch (error) {
+    // HTTP errors (500, 403, etc.), network errors, parse errors — treat as invalid ID
     return null;
   }
-
-  // JSON — check standard status format first
-  if (outer && outer.status === "y") return outer.data;
-
-  // Check for encrypted data/body/result field
-  var keys = ["data", "body", "result"];
-  for (var i = 0; i < keys.length; i++) {
-    var k = keys[i];
-    if (outer && typeof outer[k] === "string") {
-      var inner = decryptB64(outer[k]);
-      if (inner && inner.status === "y") return inner.data;
-      if (inner) return inner;
-    }
-  }
-
-  // data is already a plain object
-  if (outer && typeof outer.data === "object") return outer.data;
-
-  return null;
 }
 
 // ======================== Max ID management ========================
