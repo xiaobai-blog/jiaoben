@@ -1,9 +1,9 @@
 WidgetMetadata = {
   id: "forward.txh",
   title: "糖心",
-  version: "3.1.0",
+  version: "3.2.0",
   requiredVersion: "0.0.1",
-  description: "糖心视频 — 直连官方 API。自动尝试获取游客 Token（不保证成功）。如加载失败，请在下方手动填写 Token。获取方式：浏览器登录 txh068.com → F12 → Application → Local Storage → 复制 fuck 的值。",
+  description: "糖心视频 — 直连官方 API，自动获取游客 Token，播放自动跳过 VIP 线路。如加载失败请在下方手动填写 Token。获取方式：浏览器登录 txh068.com → F12 → Application → Local Storage → 复制 fuck 的值。",
   author: "Forward",
   site: "https://txh068.com",
   detailCacheDuration: 60,
@@ -450,14 +450,49 @@ function mapDetail(raw) {
     }];
   }
 
-  // Play URL
-  var playLink = raw.play_link || raw.play_url ||
-    (raw.lines && raw.lines.length ? raw.lines[0].link : "") ||
-    (raw.line_list && raw.line_list.length ? raw.line_list[0].link : "");
-  if (playLink) {
-    item.videoUrl = normalizeM3u8(playLink);
+  // Play URL — VIP skip logic (replicates site's player behavior)
+  // The API returns:
+  //   play_link: default m3u8 path (may be a VIP-only line)
+  //   lines: [{id, name, is_vip, link}, ...]  — is_vip "n" = free, "y" = VIP
+  // Strategy: prefer the first non-VIP line, fall back to play_link, then any line.
+  var playLink = "";
+
+  if (raw.lines && Array.isArray(raw.lines) && raw.lines.length > 0) {
+    // Step 1: find first non-VIP line (is_vip === "n")
+    for (var i = 0; i < raw.lines.length; i++) {
+      if (raw.lines[i].link && raw.lines[i].is_vip === "n") {
+        playLink = raw.lines[i].link;
+        console.log("[mapDetail] using non-VIP line: " + raw.lines[i].name + " -> " + playLink);
+        break;
+      }
+    }
+    // Step 2: if no non-VIP line, use play_link
+    if (!playLink) {
+      playLink = raw.play_link || raw.play_url || "";
+      if (playLink) console.log("[mapDetail] no free line, using play_link: " + playLink);
+    }
+    // Step 3: if still nothing, use first line with a link
+    if (!playLink) {
+      for (var i = 0; i < raw.lines.length; i++) {
+        if (raw.lines[i].link) {
+          playLink = raw.lines[i].link;
+          console.log("[mapDetail] fallback to first line: " + playLink);
+          break;
+        }
+      }
+    }
+  } else {
+    // No lines array — use play_link directly
+    playLink = raw.play_link || raw.play_url || "";
+    if (playLink) console.log("[mapDetail] no lines, using play_link: " + playLink);
   }
 
+  if (playLink) {
+    item.videoUrl = normalizeM3u8(playLink);
+    console.log("[mapDetail] final videoUrl: " + item.videoUrl);
+  }
+
+  // Backup link (alternative stream)
   var backupLink = raw.backup_link || raw.backup_url || "";
   if (backupLink) {
     item.previewUrl = normalizeM3u8(backupLink);
