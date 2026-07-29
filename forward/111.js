@@ -1,9 +1,9 @@
 WidgetMetadata = {
   id: "forward.txh",
   title: "糖心",
-  version: "3.2.0",
+  version: "3.3.0",
   requiredVersion: "0.0.1",
-  description: "糖心视频 — 直连官方 API，自动获取游客 Token，播放自动跳过 VIP 线路。如加载失败请在下方手动填写 Token。获取方式：浏览器登录 txh068.com → F12 → Application → Local Storage → 复制 fuck 的值。",
+  description: "糖心视频 — 直连官方 API，自动获取游客 Token，播放优先使用 CDN 完整视频源（跳过 VIP/预览限制），CDN 不可用时回退到官方线路。如加载失败请在下方手动填写 Token。",
   author: "Forward",
   site: "https://txh068.com",
   detailCacheDuration: 60,
@@ -40,6 +40,11 @@ WidgetMetadata = {
 var AES_KEY = "fd14f9f8e38808fa";
 var API_BASE = "https://tth.txh069.com/h5";
 var BASE_URL = "https://tth.txh069.com";
+
+// CDN: tangxinvlog.app mirror — serves full videos without VIP/preview restriction
+// All CDN resources (m3u8, key, TS segments) require Referer header
+var CDN_BASE = "https://t.5gcdn.xyz/videos";
+var CDN_REFERER = "https://tangxinvlog.app/";
 
 // ======================== AES-128-ECB ========================
 var SBOX = [
@@ -618,6 +623,51 @@ async function loadList(params) {
   }
 }
 
+// ======================== CDN Full Video ========================
+
+// Check if a video is available on the CDN mirror (t.5gcdn.xyz)
+// CDN serves full videos without VIP/preview restriction, but requires Referer header.
+// Results are cached to avoid redundant network checks.
+async function checkCdnVideo(videoId) {
+  var cacheKey = "txh_cdn_" + videoId;
+  var cached = Widget.storage.get(cacheKey);
+  if (cached === "yes" || cached === "no") {
+    return cached === "yes";
+  }
+
+  var cdnUrl = CDN_BASE + "/" + videoId + "/index.m3u8";
+  try {
+    var resp = await Widget.http.get(cdnUrl, {
+      headers: {
+        "Referer": CDN_REFERER,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      },
+    });
+    var text = "";
+    if (typeof resp === "string") {
+      text = resp;
+    } else if (resp && typeof resp.data === "string") {
+      text = resp.data;
+    } else if (resp && typeof resp.data === "object") {
+      text = JSON.stringify(resp.data);
+    }
+    var exists = text.indexOf("#EXTM3U") !== -1;
+    Widget.storage.set(cacheKey, exists ? "yes" : "no");
+    console.log("[checkCdnVideo] video " + videoId + " on CDN: " + exists);
+    return exists;
+  } catch (e) {
+    console.log("[checkCdnVideo] error for video " + videoId + ": " + (e.message || e));
+    // Negative cache for 1 hour to avoid retrying on every load
+    Widget.storage.set(cacheKey, "no");
+    return false;
+  }
+}
+
+// Build CDN m3u8 URL for a video
+function getCdnUrl(videoId) {
+  return CDN_BASE + "/" + videoId + "/index.m3u8";
+}
+
 async function loadDetail(link) {
   var videoId = String(link).replace(/[^0-9]/g, "");
 
@@ -631,6 +681,25 @@ async function loadDetail(link) {
     if (!item) {
       throw new Error("无法解析视频数据");
     }
+
+    // Save the txh068.com URL as fallback (may be preview-only for guest tokens)
+    var fallbackUrl = item.videoUrl || "";
+
+    // Try CDN mirror first — serves full video without VIP/preview restriction
+    var cdnAvailable = await checkCdnVideo(videoId);
+    if (cdnAvailable) {
+      item.videoUrl = getCdnUrl(videoId);
+      // Player needs Referer header for all CDN requests (m3u8, key, TS segments)
+      item.headers = { Referer: CDN_REFERER };
+      console.log("[loadDetail] using CDN full video: " + item.videoUrl);
+      // Keep txh068.com URL as backup
+      if (fallbackUrl) {
+        item.previewUrl = fallbackUrl;
+      }
+    } else {
+      console.log("[loadDetail] CDN unavailable, using txh068.com URL (may be preview): " + fallbackUrl);
+    }
+
     return item;
   } catch (error) {
     console.error("[loadDetail] " + (error.message || error));
